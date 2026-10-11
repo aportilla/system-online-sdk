@@ -1,6 +1,6 @@
 # The shell
 
-`system-online-sdk` runs applications over one desktop: a window manager, a menu bar that shows the front application's menus, a catalog of what is where, and a stock Finder that shows the catalog as icons. It is plain modules over [vintage-frames](https://github.com/aportilla/vintage-frames)' elements. It registers no elements, writes no styles, ships no art and composes no UI: every window and dialog on screen is an application's or the page's. It reaches the kit only through `vintage-frames`' root exports, so the page imports `vintage-frames` first.
+`system-online-sdk` runs applications over one desktop: a window manager, a menu bar that shows the front application's menus, a catalog of what is where, a stock Finder that shows the catalog as icons, and the fonts the site gives its system. It is plain modules over [vintage-frames](https://github.com/aportilla/vintage-frames)' elements. It registers no elements, writes no styles, ships no art or fonts and composes no UI: every window and dialog on screen is an application's or the page's. It reaches the kit only through `vintage-frames`' root exports, so the page imports `vintage-frames` first.
 
 The shell is experimental. Its API may change in any minor release until sprite-machine runs on all of it.
 
@@ -57,6 +57,7 @@ The desktop needs a `vf-menu-bar`, and the bar's first `vf-menu` is the system m
 | `fit` | `'viewport'` sizes the desktop to the viewport, on every resize and scale change. |
 | `state` | Where the session is saved (§ Saved state). Default `null`: a reload resets. |
 | `services` | The site's own objects, passed to every application. |
+| `fonts` | The families the site serves its system (§ Fonts). Default none. |
 | `clock` | The time in the bar's `end` slot. Default `true`. |
 | `startup` | Open what Startup Items holds once the session is back. Default `true`; `false` skips it for this boot. |
 
@@ -120,7 +121,8 @@ export const notePad = defineApp({
 | `menus` | `vf-menu` elements, each with a `data-menu` name. |
 | `dialogs` | Its dialogs, each with a `data-dialog` name (§ Dialogs). |
 | `windows` | Its windows, each with a `data-window` name, kept inert until `ctx.window()` copies one. |
-| `kinds` | The catalog kinds it opens (§ The catalog). |
+| `kinds` | The catalog kinds it registers and opens (§ The catalog). One under a name of the shell's own kinds is left out. |
+| `opens` | The shell's kinds it opens: `['font']`, for an application that opens font suitcases (§ Fonts). |
 | `init(ctx)` | Sets the application up and returns its actions, which other applications call. An application whose windows reopen after a reload, or that opens from an icon, returns `open({ item, from })`. |
 
 An application can live in a repo of its own and ship as one PNG, its app file, which a site builds in ([APP-FILES.md](./APP-FILES.md)).
@@ -143,8 +145,9 @@ What `init` gets:
 | `hold(dialog)`, `release(dialog)` | Hold a dialog it made in code, and let one go. `hold()` appends it to the desktop and returns it; `release()` removes it. |
 | `ask(dialog)` | Shows one of its held dialogs and resolves its `returnValue`, or `null` when it closed without one. Throws for a dialog it doesn't hold. |
 | `onFront(fn)` | Whether the application is in front, now and on every change. For keys and page furniture that belong to one application. |
-| `apps`, `app(id)` | Every application's actions, read at the call, and the definitions. |
-| `catalog`, `kinds`, `kind(name)` | The catalog, when a Finder runs, and the registered kinds, the shell's `app` and `alias` among them. |
+| `apps`, `app(id)`, `opener(kind)` | Every application's actions, read at the call, and the definitions. `opener('font')` is the application that opens font suitcases, or undefined (§ Fonts). |
+| `catalog`, `kinds`, `kind(name)` | The catalog, when a Finder runs, and the registered kinds, the shell's `app`, `alias` and `font` first. |
+| `fonts` | The system's fonts: the installed families, any family the site serves, a strike loaded on request, and a notice when the installed families change (§ Fonts). |
 | `services`, `state` | The site's objects and the saved session. |
 | `on(target, type, fn)`, `onDispose(fn)` | A listener and a teardown, both undone by `dispose()`. |
 
@@ -239,7 +242,7 @@ windows.open({
 interface Item {
   id: string
   name: string
-  kind: string // 'folder', or a kind an application registers
+  kind: string // 'folder', one of the shell's ('app', 'alias', 'font'), or a kind an application registers
   parent: string | null // a folder's id; null is the desktop
   left?: number // its place in its container, whole system px
   top?: number // unset: the container's next free cell
@@ -255,9 +258,9 @@ The catalog is the source of truth for what is where. It is pure: it runs under 
 - A folder never goes into itself or a folder inside it. New folders are "untitled folder", then "untitled folder 2". Copies are "Name copy", then "Name copy 2". Aliases are "Name alias", then "Name alias 2".
 - An item whose kind no application registers is kept in storage and left out of the listing.
 - Storage is three calls: `list()`, `put(item)`, `remove(id)`. `memoryStorage()` forgets on reload and `indexedDbStorage(name)` keeps. A site can write its own. Without working storage the catalog lists the volumes and the System Folder alone, and the Finder says so when asked to save.
-- A seed is stored once per storage. `seed: 'markup'` reads the `vf-icon[data-app]`, `template[data-folder]` and `template[data-system]` in the desktop's field (§ The Finder); a function stores the site's defaults through the catalog.
+- A seed is stored once per storage. `seed: 'markup'` reads the `vf-icon[data-app]`, `vf-icon[data-font]`, `template[data-folder]` and `template[data-system]` in the desktop's field (§ The Finder); a function stores the site's defaults through the catalog.
 - Positions are on the items, so they persist wherever the catalog does. Position changes are written a moment after they settle.
-- Selectors: `childrenOf`, `itemCount`, `isInside`, `enclosingFolders`, `isTrashed`, `isKept`, `descendantsOf`, `nextFolderName`, `copyName`, `aliasName`, `originalOf`, `resolve`, `canAlias`, `dropTargetOf`, `appleMenuItemsOf`, `appleMenuOf`, `startupItemsOf`. Operations: `create`, `rename`, `update`, `move`, `place`, `copy`, `emptyTrash`, `clear`, `import`, `dump`.
+- Selectors: `childrenOf`, `itemCount`, `isInside`, `enclosingFolders`, `isTrashed`, `isKept`, `descendantsOf`, `nextFolderName`, `copyName`, `aliasName`, `originalOf`, `resolve`, `canAlias`, `dropTargetOf`, `appleMenuItemsOf`, `appleMenuOf`, `startupItemsOf`, `fontFamilyOf`, `installedFamiliesOf`. Operations: `create`, `rename`, `update`, `move`, `place`, `copy`, `emptyTrash`, `clear`, `import`, `dump`.
 - `import(archive, { mode })` restores a `dump()`. `'replace'` clears the catalog first and keeps the archive's ids; `'merge'`, the default, adds the archive under fresh ids, nesting kept. It resolves a `Map` from each archive id to the item it stored, so a kind whose payload is keyed by item id can carry it over a merge. The listing is announced once, when the import is done, so a window whose item comes back stays open.
 
 A kind tells the Finder how its items look and open:
@@ -275,7 +278,9 @@ A kind tells the Finder how its items look and open:
 
 Small data goes in `data`. A large payload stays in the application's own store, under the item's id, and `copy` and `onRemove` keep that store in step.
 
-The shell registers two kinds itself. `app` is an application's icon, which opens the application. It takes its name and art from the application, keeps a name the markup gives it, and can't be renamed. Its `data` names the application, `{ app: id }`. A seed function stores one as `catalog.create({ kind: APP_KIND, name, parent, data: { app: id } })`, and `appIdOf(item)` reads the id back, or null. Both names come from either entry.
+The shell registers three kinds itself, `app`, `alias` and `font`, and an application's `kinds` can't replace them: one under any of their names is left out, and the console names the application. `font` is a font suitcase (§ Fonts).
+
+`app` is an application's icon, which opens the application. It takes its name and art from the application, keeps a name the markup gives it, and can't be renamed. Its `data` names the application, `{ app: id }`. A seed function stores one as `catalog.create({ kind: APP_KIND, name, parent, data: { app: id } })`, and `appIdOf(item)` reads the id back, or null. Both names come from either entry.
 
 `alias` is an item standing for another: an application, a document, a folder or the startup disk. Its `data` names the original and the original's kind, `{ original: id, kind }`, and `originalOf(item)` reads the id back, or null. An alias with no `kind` is read as an application's or a document's, the only aliases there were before aliases kept one. `resolve(state, id)` is the item an id names, or the original an alias stands for, wherever it was moved and whatever it was renamed, through an alias of an alias too; null once the original is removed. The Finder draws an alias with its original's art and its name in italics, and opening it opens the original: an alias of a folder or the disk opens the original's window. Copying an alias makes another alias of the same original, trashing one leaves its original alone, and `import()` keeps an alias pointing at its original when the import gives items new ids.
 
@@ -288,16 +293,17 @@ A site that names the System Folder has one:
 ```ts
 finder({
   // …
-  system: { folder: 'System Folder', appleMenu: 'Apple Menu Items', startup: 'Startup Items' },
+  system: { folder: 'System Folder', appleMenu: 'Apple Menu Items', startup: 'Startup Items', fonts: 'Fonts' },
 })
 ```
 
-The catalog keeps it on the startup disk, or on the desktop without one, with Apple Menu Items and Startup Items inside. Each has an id (`SYSTEM_FOLDER`, `APPLE_MENU_ITEMS`, `STARTUP_ITEMS`) and the site's name for it. Like a volume, each is never renamed, moved, copied or trashed, and a storage seeded before the setting has them at once. What they hold is anyone's, and it drives the desktop:
+The catalog keeps it on the startup disk, or on the desktop without one, with Apple Menu Items and Startup Items inside, and Fonts after them when the site names it. Each has an id (`SYSTEM_FOLDER`, `APPLE_MENU_ITEMS`, `STARTUP_ITEMS`, `FONTS`) and the site's name for it. Like a volume, each is never renamed, moved, copied or trashed, and a storage seeded before the setting has them at once. What they hold is anyone's, and it drives the desktop:
 
 - **Apple Menu Items** is the Apple menu. Below the page's own items, the shell lists what the folder holds, by name, case aside and a leading space first, and follows the folder as it changes. A folder in it, or an alias of a folder or the disk, is a submenu of what that folder holds, in the same order, and a folder in that is a submenu in turn, five levels down (`appleMenuOf`). A folder already on the way down, an empty folder and one past the fifth level are entries. Choosing an entry opens its item as a double-click would: an alias opens its original, and a folder opens its window. A submenu's own entry is never chosen: it opens the submenu. Each entry's `value` is its item's id. Entries are dropped while a modal dialog is open.
 - **Startup Items** opens at startup. Once the boot has reopened the session's windows, the shell opens what the folder holds, by name, each as a double-click would. One already open comes to the front. One that won't open, an alias whose original is gone say, says why, as opening it by hand would, and the rest open. `startup: false` on `createShell` skips them for a boot.
+- **Fonts** is what's installed: a suitcase directly in it installs its family, when the site serves it (§ Fonts). The name is optional. A site that leaves it out has no Fonts folder and every family it serves installed, and one that gives no fonts sees no change.
 
-`appleMenuItemsOf(state)` and `startupItemsOf(state)` list each folder's contents in that order, and nothing without the System Folder. `appleMenuOf(state)` is Apple Menu Items as a tree of `{ item, entries? }`, the tree the shell builds the Apple menu from. A folder in it, or an alias of one, carries what the folder holds as `entries`, in the same order, and so on down to five levels. A folder already on the way down, an empty folder and one past the fifth level carry none, so the tree never loops. `item` is the entry's own: an alias stays the alias. A seed files into the folders as into any folder:
+`appleMenuItemsOf(state)` and `startupItemsOf(state)` list each folder's contents in that order, and nothing without the System Folder. `installedFamiliesOf(state, families)` is Fonts' rule (§ Fonts). `appleMenuOf(state)` is Apple Menu Items as a tree of `{ item, entries? }`, the tree the shell builds the Apple menu from. A folder in it, or an alias of one, carries what the folder holds as `entries`, in the same order, and so on down to five levels. A folder already on the way down, an empty folder and one past the fifth level carry none, so the tree never loops. `item` is the entry's own: an alias stays the alias. A seed files into the folders as into any folder:
 
 ```ts
 const notePad = await catalog.create({ kind: APP_KIND, name: 'Note Pad', data: { app: 'note-pad' } })
@@ -320,9 +326,9 @@ finder({
 | Option | |
 | --- | --- |
 | `storage` | Where the catalog is kept. `null` keeps nothing. |
-| `art` | `folder`, `trash`, `trashFull` and `document` (32×32) are required; `disk`, `systemFolder`, `appleMenuItems`, `startupItems` and `caution` (32×32) and `trashMark` (12×12) are optional. The disk and the System Folder's three take the folder's art without their own; without `caution` the alerts have no art. |
+| `art` | `folder`, `trash`, `trashFull` and `document` (32×32) are required; `disk`, `systemFolder`, `appleMenuItems`, `startupItems`, `fonts`, `suitcase` and `caution` (32×32) and `trashMark` (12×12) are optional. The disk and the System Folder and its folders take the folder's art without their own, and a font suitcase the document's; without `caution` the alerts have no art. |
 | `volumes` | Default: the Trash alone. |
-| `system` | The System Folder, named: `{ folder, appleMenu, startup }` (§ The System Folder). Default: none. |
+| `system` | The System Folder, named: `{ folder, appleMenu, startup, fonts }`, `fonts` optional (§ The System Folder). Default: none. |
 | `seed` | `'markup'`, or a function. It runs once the desktop and its menu bar have rendered, so it can read `desktop.workArea`. |
 | `lattice` | `{ desktop, folder }`: each a cell size, column and row pitch and insets. Default 64px cells, 80px columns, 72px rows, 16px insets. |
 | `cleanUpAfterResize` | Clean Up the desktop once a resize settles with icons overlapping. Default `false`. |
@@ -332,9 +338,10 @@ finder({
 | `window` | A folder window's size. Default 320 × 223: three columns and two rows of icons. |
 
 - Icons are the catalog's: the desktop shows the desktop's items and each open folder window shows its folder's. An item without a position takes its container's next free cell. The desktop's cells run down from its top right, below the menu bar. A folder's run in rows from its top left. The Trash starts in the desktop's bottom-right corner.
-- `seed: 'markup'` makes an application icon of each `vf-icon[data-app]` and a folder of each `template[data-folder="Name"]`, a folder's inside it, and files what a `template[data-system]` holds in that folder of the System Folder: `<template data-system="apple-menu-items"><vf-icon data-app="note-pad"></vf-icon></template>` puts Note Pad in the Apple menu. Its value is the folder's id, `system-folder`, `apple-menu-items` or `startup-items`, and without a `system` setting it files nothing.
+- `seed: 'markup'` makes an application icon of each `vf-icon[data-app]`, a font suitcase of each `vf-icon[data-font="Geneva"]` holding that family, and a folder of each `template[data-folder="Name"]`, a folder's inside it, and files what a `template[data-system]` holds in that folder of the System Folder: `<template data-system="apple-menu-items"><vf-icon data-app="note-pad"></vf-icon></template>` puts Note Pad in the Apple menu, and `<template data-system="fonts"><vf-icon data-font="Geneva"></vf-icon></template>` installs Geneva. Its value is the folder's id, `system-folder`, `apple-menu-items`, `startup-items` or `fonts`, and without a `system` setting naming the folder it files nothing. An icon's `label` names its item; without one, an application's icon takes the application's name and a suitcase its family's.
 - An alias is drawn with its original's art and its name in italics (`vf-icon`'s `alias`). Opening it opens its original, and a drop onto an alias of a folder or the disk files into the original. With the original removed, opening it says the original couldn't be found, and so does a drop onto an alias of a folder, which keeps the folder's art and files nothing.
 - File → Make Alias makes an alias of each selected application, document, folder or disk, an alias's alias standing for the same original, named "Name alias", in the free cell nearest it. Never one of the Trash or anything in it. The new aliases are selected.
+- A font suitcase is drawn with the `suitcase` art, whether or not an application opens it, and opens in the application that says it opens suitcases. With none, an alert says so (§ Fonts).
 - Every move goes back onto the item: a drag, an arrow-key nudge, Clean Up, the resize rule.
 - A press anywhere in the desktop's field, on an icon or not, brings the Finder forward. The selection survives a switch to another application and back.
 - Folder windows are made on open and removed on close. Each shows its item count, with the trash mark when it is in the Trash, and its scrolled content grows to hold its icons.
@@ -412,9 +419,123 @@ finder({
 | `name-rejected` | A rename to nothing | none | none |
 | `move-failed` | A filing storage refused | `{ error }` | none |
 | `original-missing` | Opening an alias whose original is gone, or a drop onto an alias of a folder whose original is gone | `{ alias }`, the alias's item | none |
+| `no-application` | Opening a font suitcase, or an alias of one, while no application says it opens suitcases | `{ item }`, the suitcase | none |
 | `failed` | New Folder, Empty Trash, Paste, Make Alias or a dropped file failed | `{ action, error }`: `'new-folder'`, `'empty-trash'`, `'paste'`, `'make-alias'` or `'add-file'` | none |
 
 An alert with no handler is the Finder's own.
+
+## Fonts
+
+The system's fonts are the families the site serves, each strike a woff2 at a URL of the site's. A font suitcase in the System Folder's Fonts installs its family, and every application, an app file's included, sets type in the installed families through `ctx.fonts`. Nothing is fetched at boot: a strike loads when an application asks for it. The SDK ships no fonts, as it ships no art.
+
+```ts
+import geneva9 from './fonts/Geneva-9.woff2'
+import geneva12 from './fonts/Geneva-12.woff2'
+
+createShell(desktop, {
+  apps: [
+    finder({
+      storage,
+      art: { folder, trash, trashFull, document, fonts: fontsFolder, suitcase },
+      system: { folder: 'System Folder', appleMenu: 'Apple Menu Items', startup: 'Startup Items', fonts: 'Fonts' },
+      seed: async (catalog) => {
+        await catalog.create({ kind: FONT_KIND, name: 'Geneva', parent: FONTS, data: { family: 'Geneva' } })
+      },
+    }),
+    textEditor,
+  ],
+  fonts: [
+    {
+      name: 'Geneva',
+      strikes: [
+        { size: 9, line: 12, pitch: 12, url: geneva9, bytes: 3412, chars: 'ABC…' },
+        { size: 12, line: 15, pitch: 15, url: geneva12, bytes: 4108, chars: 'ABC…' },
+      ],
+    },
+  ],
+})
+```
+
+| `FontFamily` | |
+| --- | --- |
+| `name` | What a suitcase names. |
+| `sizes` | What its strikes' sizes count: `'points'`, the default, or `'pixels'` where a point size is unknown. |
+| `strikes` | Its strikes, each a `FontStrike`. |
+
+| `FontStrike` | |
+| --- | --- |
+| `size` | The number its family names it by. |
+| `line` | The font-size, px, that draws one design px per system px: its font rect's height. |
+| `pitch` | Its line pitch, px. |
+| `url` | Its woff2, a URL the page fetches. |
+| `bytes` | The file's size, which a suitcase weighs in the Trash. |
+| `chars` | Every character it carries. |
+
+Both types come from either entry, so a site's pure modules can build the list.
+
+### Suitcases
+
+A font suitcase is an item of the shell's `font` kind. Its `data` names a family, `{ family }`, and `fontFamilyOf(item)` reads it back, or null for anything but a suitcase. A seed stores one as `catalog.create({ kind: FONT_KIND, name, parent: FONTS, data: { family } })`, or the markup declares one as `vf-icon[data-font]` (§ The Finder). Both names come from either entry.
+
+- The Finder lists a suitcase whether or not an application opens it, and draws it with its `suitcase` art, or the document's without it. A suitcase is renamed in place: its name is its own, and its family is its data's.
+- Empty Trash weighs a suitcase as its family's strikes, and one whose family the site doesn't serve as nothing.
+- A suitcase directly in Fonts installs its family, when the site serves it. One anywhere else is a file an application can still open, and so is one in a folder inside Fonts. An alias in Fonts installs nothing.
+
+### Opening a suitcase
+
+No application owns the `font` kind. One that opens suitcases says so, `opens: ['font']`, and returns `open({ item, from })` from `init`. Opening a suitcase, by a double-click, File → Open, an alias, the Apple menu or Startup Items, goes to the first application that says so, with the suitcase's id, as an application's icon opens the application. With none, the Finder says so in its `no-application` alert, which a site answers with its own dialog through `alertWith` (§ The Finder's alerts). An application that says so and returns no `open` opens nothing. `ctx.opener('font')` is the application that opens suitcases, or undefined.
+
+```ts
+export const fontViewer = defineApp({
+  id: 'font-viewer',
+  name: 'Font Viewer',
+  opens: [FONT_KIND],
+  init(ctx) {
+    return {
+      open({ item, from }) {
+        const suitcase = ctx.catalog?.item(item)
+        const family = suitcase && ctx.fonts.family(fontFamilyOf(suitcase) ?? '')
+        // … a window showing `family`, out of `from`; one the site doesn't serve says so.
+      },
+    }
+  },
+})
+```
+
+### `ctx.fonts`
+
+| `ctx.fonts` | |
+| --- | --- |
+| `installed()` | The installed families, by name: those of the suitcases directly in Fonts that the site serves, each once. Without a Fonts folder or a catalog, every family the site serves, and the same while the catalog isn't available, before the boot reads it or when storage fails. |
+| `family(name)` | A family the site serves, installed or not, or null. A suitcase opens wherever it is. |
+| `load(family, size)` | Registers a strike once per page, by its family's name and its size, and resolves its `font-family`: the strike's own name, quoted, `"Geneva 9"`, ready to set as `--vf-font-family`. Null for a strike the site doesn't serve and when its file doesn't load, which a later call tries again. |
+| `onChange(fn)` | `fn(installed)` each time the installed families change, and only then: never for a placement, a rename, or another suitcase of a family already installed. Torn down with the application. |
+
+```ts
+init(ctx) {
+  // A Font menu of the installed families, kept up as Fonts changes.
+  const fontMenu = ctx.menu('font')
+  const list = (families: FontFamily[]) => fontMenu.replaceChildren(...families.map(menuItemFor))
+  list(ctx.fonts.installed())
+  ctx.fonts.onChange(list)
+
+  // A paragraph set in one of them.
+  async function setIn(p: VfParagraph, name: string, size: number) {
+    const strike = ctx.fonts.family(name)?.strikes.find((s) => s.size === size)
+    const family = strike && (await ctx.fonts.load(name, size))
+    if (!strike || !family) return
+    p.style.setProperty('--vf-font-family', family)
+    p.style.setProperty('--vf-font-size', `${strike.line}px`)
+    p.style.setProperty('--vf-paragraph-line-height', `${strike.pitch}px`)
+    p.style.setProperty('--vf-font-smoothing', 'none')
+  }
+}
+```
+
+- A strike registers under its own name, its family's and its size, since CSS can't pick a bitmap strike by size. It registers at weight 100 to 900: window content inherits the kit's weight 700, and a face registered at 400 gets a synthesized bold. A shell made again after a hot reload finds it registered.
+- The application sets a strike on its own elements through the kit's tokens: its family, its `line` as the size and its `pitch` as the line height, together, and `--vf-font-smoothing: none`, since the body face smooths by default ([vintage-frames' FONTS.md](https://github.com/aportilla/vintage-frames/blob/main/docs/FONTS.md)). Editable text is the display face, whose tokens end in `-display`. A Font menu is the application's to build: the shell composes no UI.
+- `installedFamiliesOf(state, families)` is `installed()`'s rule, pure, for a site's tests: the families of `families` that `state`, a catalog's listing, installs, and every one for `null`.
+- An application on a page older than `ctx.fonts` finds none, and that page lists no suitcase. One that wants such pages checks for `ctx.fonts` before it uses it.
 
 ## Saved state
 
@@ -444,11 +565,12 @@ Each module also works alone, on a page built from the elements ([vintage-frames
 | `createWindowManager(desktop, options)` | The window manager without the menu bar. |
 | `pinOf`, `pinTo`, `frameOf`, `cascadedBox`, `centeredBox`, `desktopLattice`, `folderLattice`, `trashCell`, `nextFreeCell`, `freeCellNear`, `cleanUp`, `fillOrder`, `fieldExtent`, `collisions` | The geometry, pure: boxes and positions in whole system px. |
 | `localStorageState`, `readSession`, `mergeSession` | The saved session. |
+| `installedFamiliesOf`, `FontFamily`, `FontStrike` | The system's fonts' rule and types, pure (§ Fonts). |
 | `startClock` | The clock. |
 | `readAppFile`, `inspectAppFile`, `satisfies`, `compareVersions`, `appRuns`, `APP_FILE_FORMAT`, `APP_API`, `APP_API_OLDEST`, `BOX_SCALE` | An app file's manifest and code, or why it isn't one; a version checked against a range, and versions put in order; whether this SDK runs an application, and the app API levels it runs; the scale every box is drawn at ([APP-FILES.md](./APP-FILES.md)). |
 | `VERSION` | The SDK's version. |
 
-`system-online-sdk/pure` exports the catalog, the geometry, the saved session, the app file reader and `VERSION` alone. They import nothing of vintage-frames and touch no DOM when imported, so a site's own pure modules, and their tests under Node, import them from there:
+`system-online-sdk/pure` exports the catalog, the system's fonts' rule and types, the geometry, the saved session, the app file reader and `VERSION` alone. They import nothing of vintage-frames and touch no DOM when imported, so a site's own pure modules, and their tests under Node, import them from there:
 
 ```ts
 import { createCatalog, memoryStorage, childrenOf, isPin, cascadedBox } from 'system-online-sdk/pure'
@@ -458,4 +580,4 @@ import { createCatalog, memoryStorage, childrenOf, isPin, cascadedBox } from 'sy
 
 ## The reference page
 
-This repo's `index.html` runs the shell with the Finder and Note Pad, a small application with documents of its own kind, an Info palette, a close that asks about unsaved changes in an alert of its own, and a `claim` that makes a note of a dropped text file (`demo/main.ts`). Its System Folder sits on the desktop, and its Apple Menu Items holds Note Pad. `?save=1` keeps the catalog and the session across reloads, `?cleanup=1` turns on Clean Up after a resize, and `?open=Projects&open=Archive` opens those items at load. `verify:front`, `verify:windows` and `verify:finder` drive it, and `verify:unit` tests the pure modules and the build entry under Node ([DEVELOPING.md](./DEVELOPING.md)).
+This repo's `index.html` runs the shell with the Finder and Note Pad, a small application with documents of its own kind, an Info palette, a close that asks about unsaved changes in an alert of its own, a `claim` that makes a note of a dropped text file, and a Font menu of the installed families (`demo/main.ts`). Its System Folder sits on the desktop. Its Apple Menu Items holds Note Pad, and its Fonts a suitcase of each of the two families the page serves its system, vintage-frames' own faces (`demo/fonts.ts`). No application there opens a suitcase, so opening one raises the Finder's alert. `?save=1` keeps the catalog and the session across reloads, `?cleanup=1` turns on Clean Up after a resize, and `?open=Projects&open=Archive` opens those items at load. `verify:front`, `verify:windows`, `verify:finder` and `verify:fonts` drive it, the last fixtures of its own too, and `verify:unit` tests the pure modules and the build entry under Node ([DEVELOPING.md](./DEVELOPING.md)).

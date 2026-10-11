@@ -74,7 +74,7 @@ const windowsOf = (s, app) =>
   bar = await s.bar()
   check(
     'BAR  an application’s window active puts its name and menus on the bar',
-    (await s.front()) === 'note-pad' && bar.label === 'Note Pad' && bar.menus.join() === 'File,Window',
+    (await s.front()) === 'note-pad' && bar.label === 'Note Pad' && bar.menus.join() === 'File,Font,Window',
     `${await s.front()} ${JSON.stringify(bar)} active=${await s.active()}`
   )
   const slot = await page.evaluate(() => {
@@ -321,7 +321,7 @@ const windowsOf = (s, app) =>
   st = await state()
   check(
     'DIALOGS  …then to the front application',
-    st.label === 'Note Pad' && st.menus.join() === 'File,Window' && st.asking === null && st.front === 'note-pad',
+    st.label === 'Note Pad' && st.menus.join() === 'File,Font,Window' && st.asking === null && st.front === 'note-pad',
     JSON.stringify(st)
   )
   await page.close()

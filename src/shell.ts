@@ -14,10 +14,20 @@
  *   application's name and menus instead; nothing else changes.
  * - Each application's `init(ctx)` gets the desktop, the window manager, its
  *   own menus, dialogs and window markup, the other applications' actions
- *   (read at the call), the catalog when a Finder runs, the site's services,
- *   `ask()`, `gate()`, `onFront()` and `onDispose()`. Everything it sets up
- *   comes down through `onDispose()`, and its dialogs with it, so a hot
- *   reload starts clean. The shell composes no UI of its own.
+ *   (read at the call), the catalog when a Finder runs, the system's fonts,
+ *   the site's services, `ask()`, `gate()`, `onFront()` and `onDispose()`.
+ *   Everything it sets up comes down through `onDispose()`, and its dialogs
+ *   with it, so a hot reload starts clean. The shell composes no UI of its
+ *   own.
+ * - The shell registers three kinds itself, which no application's `kinds`
+ *   replaces: `app`, an application's icon, which opens the application;
+ *   `alias`, which opens its original; and `font`, a suitcase, which opens
+ *   in the first application that says it opens suitcases (`opens`).
+ * - The system's fonts are the families the site serves. A suitcase
+ *   directly in the System Folder's Fonts installs its family. `ctx.fonts`
+ *   gives every application the installed families, any family by name and
+ *   a strike loaded when it asks, and says when the installed families
+ *   change, and only then.
  * - A window showing a catalog item follows it: its title follows a rename,
  *   and it closes when the item is removed.
  * - The boot waits for the desktop and its menu bar to render, reads the
@@ -37,8 +47,21 @@ import type {
   VfModalDialog,
   VfViewportBox,
 } from 'vintage-frames'
-import { ALIAS_KIND, APP_KIND, appIdOf, appleMenuOf, createCatalog, resolve, startupItemsOf } from './catalog.js'
+import {
+  ALIAS_KIND,
+  APP_KIND,
+  FONT_KIND,
+  appIdOf,
+  appleMenuOf,
+  createCatalog,
+  fontFamilyOf,
+  resolve,
+  startupItemsOf,
+} from './catalog.js'
 import type { AppleMenuEntry, Catalog, CatalogStorage, Item, SystemFolders, Volumes } from './catalog.js'
+import { installedFamiliesOf } from './fonts.js'
+import type { FontFamily } from './fonts.js'
+import { loadStrike } from './strikes.js'
 import { createWindowManager, deepActiveElement, desktopRendered } from './windows.js'
 import type { WindowManager } from './windows.js'
 import { openWindowsOf } from './state.js'
@@ -69,7 +92,7 @@ export interface KindDefinition {
 export interface CatalogSetup {
   storage: CatalogStorage | null
   volumes?: Volumes
-  /** The System Folder, named; its folders drive the Apple menu and what opens at startup. */
+  /** The System Folder, named; its folders drive the Apple menu, what opens at startup and the fonts installed. */
   system?: SystemFolders
   /** Run once per storage, to store the site's defaults. */
   seed?: (catalog: Catalog) => void | Promise<void>
@@ -94,8 +117,14 @@ export interface AppDefinition<Actions = unknown> {
    * `ctx.window(name)` makes a fresh copy of one on each call.
    */
   windows?: string
-  /** The catalog kinds it opens. */
+  /** The catalog kinds it registers and opens; one of the shell's own (`app`, `alias`, `font`) is left out. */
   kinds?: Record<string, KindDefinition>
+  /**
+   * The shell's kinds it opens: `['font']`. Opening a suitcase goes to the
+   * first application that names its kind here, through its
+   * `open({ item, from })`.
+   */
+  opens?: readonly string[]
   /** The Finder's: the catalog every application shares. */
   catalog?: CatalogSetup
   /**
@@ -120,12 +149,20 @@ export interface AppContext {
   readonly services: Record<string, any>
   /** The saved session, or null. */
   readonly state: ShellState | null
-  /** Every kind the applications register, the shell's `app` and `alias` kinds included, in registration order. */
+  /** The system's fonts: the families the site serves, and which are installed. */
+  readonly fonts: SystemFonts
+  /** Every kind the applications register, the shell's `app`, `alias` and `font` first, in registration order. */
   readonly kinds: ReadonlyMap<string, KindDefinition>
   /** A kind's definition, or undefined. */
   kind(kind: string): KindDefinition | undefined
   /** The application definition with `id`. */
   app(id: string): AppDefinition | undefined
+  /**
+   * The application that opens items of the shell's `kind`: for `font`, the
+   * first whose `opens` names it. Undefined when none does, and for any
+   * other kind, which opens itself.
+   */
+  opener(kind: string): AppDefinition | undefined
   /** One of its menus by `data-menu`; throws when the markup drifts. */
   menu(name: string): VfMenu
   /** One of its menu items by `value`; throws when the markup drifts. */
@@ -164,6 +201,28 @@ export interface AppContext {
   onDispose(fn: () => void): void
 }
 
+/** The system's fonts, on every application's context. */
+export interface SystemFonts {
+  /**
+   * The installed families, by name: those of the suitcases directly in
+   * Fonts that the site serves, each once. Without a Fonts folder, without a
+   * catalog, or while it isn't available, every family the site serves.
+   */
+  installed(): FontFamily[]
+  /** A family the site serves, installed or not, by name; null for any other. */
+  family(name: string): FontFamily | null
+  /**
+   * Register a strike of a family the site serves, by the family's name and
+   * the strike's size, and resolve its `font-family`: the strike's own name,
+   * quoted (`"Geneva 9"`), ready to set as `--vf-font-family`. A strike
+   * registers once per page. Null for a strike the site doesn't serve, and
+   * when its file doesn't load, which a later call tries again.
+   */
+  load(family: string, size: number): Promise<string | null>
+  /** Follow the installed families: `fn` gets them each time they change, and only then. Torn down with the application. */
+  onChange(fn: (installed: FontFamily[]) => void): void
+}
+
 /** Declare an application, with its actions' type. */
 export function defineApp<Actions>(definition: AppDefinition<Actions>): AppDefinition<Actions> {
   return definition
@@ -180,6 +239,8 @@ export interface ShellOptions {
   state?: ShellState | null
   /** The site's own services, handed to every application. */
   services?: Record<string, unknown>
+  /** The families the site serves its system; a strike is fetched only when an application loads it. Default none. */
+  fonts?: readonly FontFamily[]
   /** The clock in the menu bar's `end` slot. Default true. */
   clock?: boolean
   /** Open what Startup Items holds once the session is back. Default true; false skips it for this boot. */
@@ -247,12 +308,20 @@ export function createShell(desktop: VfDesktop, options: ShellOptions): Shell {
   desktop.addEventListener('pointerdown', onDesktopPress)
   teardown.push(() => desktop.removeEventListener('pointerdown', onDesktopPress))
 
-  // Kinds: every application's, and the shell's own two. An application's
-  // icon opens the application. An alias opens its original as a
-  // double-click would, through the Finder, which says so when it's gone.
+  // Kinds: the shell's own three, then every application's. An
+  // application's icon opens the application. An alias opens its original
+  // as a double-click would, through the Finder, which says so when it's
+  // gone. A suitcase opens in the first application that says it opens
+  // suitcases, and weighs its family's strikes; the Finder draws it, and
+  // says so when nothing opens it. An application's kind under one of the
+  // shell's names is left out, and the console names the application.
   const actions: Record<string, any> = {}
   const openAsDoubleClick = (item: string, from: VfViewportBox | null = null) =>
     actions[finderDef?.id ?? '']?.open?.({ item, from })
+  const opener = (kind: string): AppDefinition | undefined =>
+    kind === FONT_KIND ? definitions.find((d) => d.opens?.includes(kind)) : undefined
+  const families = options.fonts ?? []
+  const familyNamed = (name: string | null): FontFamily | null => families.find((f) => f.name === name) ?? null
   const kinds = new Map<string, KindDefinition>()
   kinds.set(APP_KIND, {
     art: (item) => definitions.find((d) => d.id === appIdOf(item))?.icon ?? '',
@@ -268,7 +337,22 @@ export function createShell(desktop: VfDesktop, options: ShellOptions): Shell {
     },
     open: (item, from) => void openAsDoubleClick(item.id, from),
   })
-  for (const def of definitions) for (const [kind, k] of Object.entries(def.kinds ?? {})) kinds.set(kind, k)
+  kinds.set(FONT_KIND, {
+    art: '',
+    open: (item, from) => void actions[opener(FONT_KIND)?.id ?? '']?.open?.({ item: item.id, from }),
+    size: (item) => familyNamed(fontFamilyOf(item))?.strikes.reduce((sum, s) => sum + s.bytes, 0) ?? 0,
+  })
+  const shellKinds = new Set(kinds.keys())
+  for (const def of definitions) {
+    for (const [kind, k] of Object.entries(def.kinds ?? {})) {
+      if (!shellKinds.has(kind)) {
+        kinds.set(kind, k)
+        continue
+      }
+      const hint = kind === FONT_KIND ? `; one that opens suitcases says so: opens: ['${FONT_KIND}']` : ''
+      console.warn(`system-online-sdk (${def.id}): the ${kind} kind is the shell's own, so the application's is left out${hint}`)
+    }
+  }
 
   const catalog = finderDef?.catalog
     ? createCatalog({
@@ -279,6 +363,21 @@ export function createShell(desktop: VfDesktop, options: ShellOptions): Shell {
         hooks: (kind) => kinds.get(kind),
       })
     : null
+
+  // The installed families, followed through the catalog and announced only
+  // when they change: the catalog announces every placement too.
+  let installed = installedFamiliesOf(catalog?.get() ?? null, families)
+  const fontListeners = new Set<(installed: FontFamily[]) => void>()
+  if (catalog) {
+    teardown.push(
+      catalog.subscribe((st) => {
+        const next = installedFamiliesOf(st, families)
+        if (next.length === installed.length && next.every((family, i) => family === installed[i])) return
+        installed = next
+        for (const fn of [...fontListeners]) fn(installed.slice())
+      })
+    )
+  }
 
   // Modals, typing and gates.
   const modalOpen = () => !!document.querySelector('vf-dialog[open]')
@@ -354,9 +453,19 @@ export function createShell(desktop: VfDesktop, options: ShellOptions): Shell {
       catalog,
       services,
       state,
+      fonts: {
+        installed: () => installed.slice(),
+        family: familyNamed,
+        load: (family, size) => loadStrike(familyNamed(family), size),
+        onChange(fn) {
+          fontListeners.add(fn)
+          own.push(() => fontListeners.delete(fn))
+        },
+      },
       kinds,
       kind: (kind) => kinds.get(kind),
       app: (id) => definitions.find((d) => d.id === id),
+      opener,
       menu(name) {
         const menu = menus.find((m) => m.dataset.menu === name)
         if (!menu) throw new Error(`${where}: missing menu ${name}`)

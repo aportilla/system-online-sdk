@@ -13,7 +13,7 @@ npm run typecheck
 npm test           # the whole suite (starts its own dev server)
 ```
 
-[`/`](http://localhost:5174/) is a desktop filling the viewport, with the Finder over a catalog seeded from the page's markup, and Note Pad, a small application with documents, a palette and a close that asks about unsaved changes (`demo/main.ts`). `?save=1` keeps the catalog and the session across reloads; `?cleanup=1` turns on Clean Up after a resize; `?open=Projects&open=Archive` opens those items at load. The art in `demo/icons/` is the page's own and doesn't ship.
+[`/`](http://localhost:5174/) is a desktop filling the viewport, with the Finder over a catalog seeded from the page's markup, and Note Pad, a small application with documents, a palette, a close that asks about unsaved changes and a Font menu of the installed families (`demo/main.ts`). The page gives its system two families, vintage-frames' own faces, with a suitcase of each in the System Folder's Fonts (`demo/fonts.ts`). `?save=1` keeps the catalog and the session across reloads; `?cleanup=1` turns on Clean Up after a resize; `?open=Projects&open=Archive` opens those items at load. The art in `demo/icons/` and the fonts in `demo/fonts/` are the page's own and don't ship.
 
 The dev server runs on 5174, apart from vintage-frames' on 5173, and serves vintage-frames from `node_modules`, as a site would. To try a vintage-frames change here before it's published, build it there, `npm pack` it, and install the tarball here with `npm install --no-save <tarball>`.
 
@@ -25,8 +25,8 @@ npm test -- finder unit   # only the ones whose name matches
 npm run verify:finder     # one script, against a dev server you started
 ```
 
-- `verify:unit` compiles the two Node entries, `src/pure.ts` and `src/build/index.ts`, with `tsconfig.unit.json` into `scripts/.tmp/unit`, and runs `test/*.test.mjs` with Node's own runner: the catalog, the geometry, the saved session, the app file's reader and writer, PNG pixels, the box, the faces as data, and the app API's list and its release check. It also checks the ground rules from the sources: the shell imports vintage-frames only through its root and never the build entry, the pure modules import nothing of the kit, the shell registers no elements and writes no styles, and the build entry reaches no element.
-- `verify:front`, `verify:windows` and `verify:finder` are Playwright drivers over the reference page: the bar and the front application, the window manager and the saved session, and the Finder. Their shared code is `scripts/harness.mjs`.
+- `verify:unit` compiles the two Node entries, `src/pure.ts` and `src/build/index.ts`, with `tsconfig.unit.json` into `scripts/.tmp/unit`, and runs `test/*.test.mjs` with Node's own runner: the catalog, the system's fonts, the geometry, the saved session, the app file's reader and writer, PNG pixels, the box, the faces as data, and the app API's list and its release check. It also checks the ground rules from the sources: the shell imports vintage-frames only through its root and never the build entry, the pure modules import nothing of the kit, the shell registers no elements and writes no styles, and the build entry reaches no element.
+- `verify:front`, `verify:windows`, `verify:finder` and `verify:fonts` are Playwright drivers over the reference page: the bar and the front application, the window manager and the saved session, the Finder, and the system's fonts, which also boots fixtures of its own. Their shared code is `scripts/harness.mjs`.
 - The two Vite plugins have no unit tests. Building an application and a site with them checks them.
 
 ## The box's frame

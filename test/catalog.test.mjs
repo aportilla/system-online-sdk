@@ -9,6 +9,8 @@ import {
   APPLE_MENU_ITEMS,
   APP_KIND,
   DISK,
+  FONTS,
+  FONT_KIND,
   STARTUP_ITEMS,
   SYSTEM_FOLDER,
   TRASH,
@@ -24,6 +26,7 @@ import {
   descendantsOf,
   dropTargetOf,
   enclosingFolders,
+  fontFamilyOf,
   isInside,
   isKept,
   isTrashed,
@@ -394,6 +397,40 @@ test('the System Folder: a storage from before has it at once; without a disk on
   await none.create({ name: 'On the desktop', kind: 'text' })
   assert.deepEqual(appleMenuItemsOf(none.get()), [], 'no folder, no entries: never the desktop’s items')
   assert.deepEqual(startupItemsOf(none.get()), [])
+})
+
+test('Fonts: in the System Folder after Startup Items when the site names it, kept like the others', async () => {
+  const storage = memoryStorage()
+  const before = await library({ storage, system: SYSTEM })
+  await before.catalog.seed((c) => c.create({ name: 'Read Me', kind: 'text' }))
+  assert.equal(before.catalog.item(FONTS), null, 'without the name, none')
+  const { catalog } = await library({ storage, system: { ...SYSTEM, fonts: 'Fonts' } })
+  const st = catalog.get()
+  assert.deepEqual(names(childrenOf(st, SYSTEM_FOLDER)), ['Apple Menu Items', 'Startup Items', 'Fonts'], 'a storage from before has it at once')
+  assert.deepEqual(enclosingFolders(st, FONTS), [FONTS, SYSTEM_FOLDER, DISK])
+  const box = await catalog.create({ name: 'Box' })
+  assert.ok(isKept(FONTS))
+  assert.equal(await catalog.rename(FONTS, 'Typefaces'), false)
+  assert.deepEqual(await catalog.move([FONTS], box.id), [])
+  assert.deepEqual(await catalog.move([FONTS], TRASH), [], 'nor goes in the Trash')
+  assert.deepEqual(await catalog.copy([FONTS], null), [])
+  const geneva = await catalog.create({ name: 'Geneva', kind: FONT_KIND, parent: FONTS, data: { family: 'Geneva' } })
+  assert.equal(geneva.parent, FONTS, 'what it holds is anyone’s')
+  assert.deepEqual(await catalog.move([geneva.id], TRASH), [geneva.id])
+  assert.equal(storage.records.has(FONTS), false, 'nothing of it is stored until placed')
+})
+
+test('fontFamilyOf: a suitcase’s data names its family; null for anything else', async () => {
+  const { catalog } = await library()
+  const suitcase = await catalog.create({ name: 'Geneva', kind: FONT_KIND, data: { family: 'Geneva' } })
+  assert.equal(suitcase.kind, 'font')
+  assert.equal(fontFamilyOf(suitcase), 'Geneva')
+  assert.equal(fontFamilyOf({ ...suitcase, name: 'Mine' }), 'Geneva', 'its name is its own')
+  assert.equal(fontFamilyOf({ ...suitcase, data: undefined }), null)
+  assert.equal(fontFamilyOf({ ...suitcase, data: { family: 9 } }), null, 'a family that isn’t a string')
+  assert.equal(fontFamilyOf({ ...suitcase, kind: 'text' }), null, 'only a suitcase has one')
+  const alias = await catalog.create({ name: 'Geneva alias', kind: ALIAS_KIND, data: { original: suitcase.id, kind: FONT_KIND } })
+  assert.equal(fontFamilyOf(alias), null, 'nor an alias of one')
 })
 
 test('Apple Menu Items and Startup Items: what each holds, by name, case aside, a leading space first', async () => {

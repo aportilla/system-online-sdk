@@ -1,10 +1,12 @@
 /**
  * index.html's script: the shell over the page's desktop. The Finder shows a
  * catalog seeded from the page's markup, with a System Folder whose Apple
- * Menu Items holds Note Pad; Note Pad is a small application with documents
- * of its own kind, an Info palette shown while it is front, a close that asks
- * about unsaved changes in an alert of its own, and a zoom box the window
- * manager runs.
+ * Menu Items holds Note Pad and whose Fonts holds a suitcase of each family
+ * the page gives its system (demo/fonts.ts). Note Pad is a small application
+ * with documents of its own kind, an Info palette shown while it is front, a
+ * close that asks about unsaved changes in an alert of its own, a zoom box
+ * the window manager runs, and a Font menu of the installed families. No
+ * application here opens a suitcase, so opening one says so.
  *
  * `?save=1` keeps the catalog in IndexedDB and the session in localStorage;
  * `?cleanup=1` turns on the Finder's Clean Up after a resize; `?open=` opens
@@ -13,7 +15,7 @@
 
 import 'vintage-frames'
 import { VfWindow } from 'vintage-frames'
-import type { VfDesktop, VfLabel, VfTextArea, VfViewportBox } from 'vintage-frames'
+import type { VfDesktop, VfLabel, VfMenuItem, VfTextArea, VfViewportBox } from 'vintage-frames'
 import {
   createShell,
   defineApp,
@@ -22,7 +24,8 @@ import {
   localStorageState,
   memoryStorage,
 } from '../src/index.js'
-import type { AppDefinition, Box, Catalog, Item } from '../src/index.js'
+import type { AppDefinition, Box, Catalog, FontFamily, FontStrike, Item } from '../src/index.js'
+import { DEMO_FONTS } from './fonts.js'
 
 const ICONS = '/demo/icons'
 
@@ -38,6 +41,7 @@ const NOTE_PAD_MENUS = `
     <vf-separator></vf-separator>
     <vf-menu-item value="close" shortcut="⌃W">Close</vf-menu-item>
   </vf-menu>
+  <vf-menu data-menu="font" label="Font"></vf-menu>
   <vf-menu data-menu="window" label="Window">
     <vf-menu-item value="info">Hide Info</vf-menu-item>
   </vf-menu>`
@@ -205,9 +209,57 @@ function notePad(): AppDefinition<NotePadActions> {
       ctx.on(desktop, 'vf-activate', showInfo)
       showInfo()
 
-      ctx.onMenu((value) => {
+      // The Font menu: the installed families, by name, following Fonts. A
+      // pick sets the front document in the family's strike nearest 12.
+      const fontMenu = ctx.menu('font')
+      /** Each document's family, once one is picked. */
+      const fontOf = new WeakMap<VfWindow, string>()
+      /** Each family's item, made once: disabled with no document front, and checked for the front one's. */
+      const fontItems = new Map<string, VfMenuItem>()
+      const fontItem = (name: string): VfMenuItem => {
+        const known = fontItems.get(name)
+        if (known) return known
+        const item = document.createElement('vf-menu-item')
+        item.setAttribute('value', name)
+        item.textContent = name
+        ctx.gate(item, () => {
+          const win = front()
+          const checked = !!win && fontOf.get(win) === name
+          if (item.checked !== checked) item.checked = checked
+          return !!win
+        })
+        fontItems.set(name, item)
+        return item
+      }
+      const listFonts = (families: FontFamily[]) => fontMenu.replaceChildren(...families.map((f) => fontItem(f.name)))
+      listFonts(ctx.fonts.installed())
+      ctx.fonts.onChange(listFonts)
+
+      /** The strike nearest `size`, the first of two as near. */
+      const nearest = (family: FontFamily | null, size: number): FontStrike | null => {
+        let best: FontStrike | null = null
+        for (const s of family?.strikes ?? []) if (!best || Math.abs(s.size - size) < Math.abs(best.size - size)) best = s
+        return best
+      }
+      async function setFont(win: VfWindow, name: string): Promise<void> {
+        const strike = nearest(ctx.fonts.family(name), 12)
+        const face = strike && (await ctx.fonts.load(name, strike.size))
+        if (!strike || !face) return
+        // Editable text is the display face: its family, size and pitch,
+        // together. The area keeps its height, six of the display face's lines.
+        const area = textArea(win)
+        area.style.setProperty('--vf-font-family-display', face)
+        area.style.setProperty('--vf-font-size-display', `${strike.line}px`)
+        area.style.setProperty('--vf-line-height-display', `${strike.pitch}px`)
+        area.rows = Math.floor((6 * 16) / strike.pitch)
+        fontOf.set(win, name)
+      }
+
+      ctx.onMenu((value, item) => {
         const win = front()
-        if (value === 'new') newNote()
+        if (fontMenu.contains(item)) {
+          if (win) void setFont(win, value)
+        } else if (value === 'new') newNote()
         else if (value === 'save' && win) void save(win)
         else if (value === 'close' && win) windows.requestClose(win)
         else if (value === 'info') {
@@ -254,7 +306,7 @@ const shell = createShell(desktop, {
   apps: [
     finder({
       storage: keep ? indexedDbStorage('system-online-sdk-reference') : memoryStorage(),
-      system: { folder: 'System Folder', appleMenu: 'Apple Menu Items', startup: 'Startup Items' },
+      system: { folder: 'System Folder', appleMenu: 'Apple Menu Items', startup: 'Startup Items', fonts: 'Fonts' },
       seed: 'markup',
       art: {
         folder: `${ICONS}/folder.png`,
@@ -268,6 +320,7 @@ const shell = createShell(desktop, {
     }),
     notePad(),
   ],
+  fonts: DEMO_FONTS,
   fit: 'viewport',
   state: keep ? localStorageState('system-online-sdk-reference') : null,
 })

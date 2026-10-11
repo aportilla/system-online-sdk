@@ -3,8 +3,9 @@
  *
  *  - SEED: the page's markup becomes the catalog: its application icon, its
  *    folders and the folder inside one, in order, then what its
- *    template[data-system] holds, in Apple Menu Items, and the markup leaves
- *    the field. The System Folder and its folders lead, after the Trash.
+ *    template[data-system] holds, in Apple Menu Items and Fonts, the
+ *    suitcases holding their families, and the markup leaves the field. The
+ *    System Folder and its folders lead, after the Trash.
  *  - FILING: a drop onto a folder icon files into the folder, whose icon
  *    wears `target` under the pointer; a drop into a folder window lands at
  *    the drop point, and a drop out of one lands on the desktop. A folder
@@ -93,18 +94,21 @@ const overlapping = (icons) =>
   const items = await page.evaluate(() => {
     const st = window.shell.catalog.get()
     const name = (id) => st.items.find((i) => i.id === id)?.name ?? null
-    return st.items.map((i) => `${i.kind}:${i.name}<${name(i.parent) ?? 'desktop'}`)
+    return st.items.map((i) => `${i.kind}:${i.name}<${name(i.parent) ?? 'desktop'}${i.data?.family ? `=${i.data.family}` : ''}`)
   })
   check(
-    'SEED  the markup becomes the catalog, in order: the application named by its application, Apple Menu Items’ last',
+    'SEED  the markup becomes the catalog, in order: the application named by its application, Apple Menu Items’ and Fonts’ last',
     items.join() ===
       'trash:Trash<desktop,folder:System Folder<desktop,folder:Apple Menu Items<System Folder,folder:Startup Items<System Folder,' +
-        'app:Note Pad<desktop,folder:Documents<desktop,folder:Projects<desktop,folder:Archive<Projects,app:Note Pad<Apple Menu Items',
+        'folder:Fonts<System Folder,app:Note Pad<desktop,folder:Documents<desktop,folder:Projects<desktop,folder:Archive<Projects,' +
+        'app:Note Pad<Apple Menu Items,font:VF Body<Fonts=VF Body,font:VF Display<Fonts=VF Display',
     items.join()
   )
   check(
     'SEED  …and the declarations leave the field',
-    await page.evaluate(() => !document.querySelector('vf-icon-field > template, vf-icon-field > vf-icon[data-app]'))
+    await page.evaluate(
+      () => !document.querySelector('vf-icon-field > template, vf-icon-field > vf-icon[data-app], vf-icon-field > vf-icon[data-font]')
+    )
   )
 
   // Onto a folder icon: Note Pad's icon into Documents.

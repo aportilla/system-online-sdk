@@ -4,13 +4,13 @@ The SDK has three kinds of consumer, and this guide gives each the order to do t
 
 | Building | Start at |
 | --- | --- |
-| **A site**: the page that hosts the desktop. It holds the menu bar and the Finder, chooses the applications and keeps the visitor's files. SystemOnline and Sprite Machine are sites. | [A site in five steps](#a-site-in-five-steps) |
+| **A site**: the page that hosts the desktop. It holds the menu bar and the Finder, chooses the applications, keeps the visitor's files and gives the system its fonts. SystemOnline and Sprite Machine are sites. | [A site in six steps](#a-site-in-six-steps) |
 | **An application**: its windows, menus and documents on the desktop. A site's own lives in the site's repo. One in a repo of its own ships as an app file, as Meteors does. | [Writing an application](#writing-an-application), then for a repo of its own [An application in its own repo](#an-application-in-its-own-repo) |
 | **A tool that reads or writes app files**: an index, a store, a test. system-online-app-index is one. | [A tool that reads app files](#a-tool-that-reads-app-files) |
 
 [SHELL.md](./SHELL.md) documents every option and call, and [APP-FILES.md](./APP-FILES.md) the app file. [Moving to a new release](#moving-to-a-new-release) is for all three. The last section is the steps the existing repos take to move onto the SDK.
 
-## A site in five steps
+## A site in six steps
 
 ### 1. The page
 
@@ -58,7 +58,7 @@ if (import.meta.hot) import.meta.hot.dispose(() => shell.dispose())
 
 ### 2. Applications
 
-Write each application as [Writing an application](#writing-an-application) says, and pass them in `apps`. Keep each of the site's own in a directory under `src/apps/`. An application from another repo comes in from its app file (step 5).
+Write each application as [Writing an application](#writing-an-application) says, and pass them in `apps`. Keep each of the site's own in a directory under `src/apps/`. An application from another repo comes in from its app file (step 6).
 
 - `services` hands every application the site's own objects ([SHELL.md § Setup](./SHELL.md#setup)). An application from an app file uses none, so that it runs on any site.
 
@@ -124,7 +124,41 @@ await catalog.create({
 - A storage made before `system` was set gets the System Folder and its two folders at once, empty. The site fills them once, as in step 3.
 - A site without a System Folder can still list an application among its own items in the system menu, and open it with `shell.apps[id].open({})` when the item is chosen.
 
-### 5. Applications from app files
+### 5. Fonts
+
+A site gives its system the fonts it serves, and its System Folder a Fonts folder. A font suitcase in Fonts installs its family, and every application, one from an app file included, sets type in the installed families through `ctx.fonts` ([SHELL.md § Fonts](./SHELL.md#fonts)).
+
+```ts
+import { FONTS, FONT_KIND } from 'system-online-sdk/pure'
+import { FONT_FAMILIES } from './fonts.ts'
+
+const shell = createShell(document.querySelector('vf-desktop')!, {
+  apps: [
+    finder({
+      storage: indexedDbStorage('my-site'),
+      art: { ...art, fonts: fontsFolderArt, suitcase: suitcaseArt },
+      volumes: { disk: 'Macintosh HD', trash: 'Trash' },
+      system: { folder: 'System Folder', appleMenu: 'Apple Menu Items', startup: 'Startup Items', fonts: 'Fonts' },
+      seed: async (catalog) => {
+        for (const { name } of FONT_FAMILIES) {
+          await catalog.create({ kind: FONT_KIND, name, parent: FONTS, data: { family: name } })
+        }
+      },
+    }),
+    fontViewer(),
+  ],
+  fonts: FONT_FAMILIES,
+})
+```
+
+- Serve each strike as a woff2, and list each family with its strikes: each strike's size, the font-size that draws one design px per system px, its line pitch, its URL, its bytes and every character it carries. Nothing loads at boot: a strike loads when an application asks for it.
+- Build the list in a module of its own, `src/fonts.ts` say, from the site's own manifest of its collection. Its types come from `system-online-sdk/pure`, so its tests run under Node.
+- File a suitcase of each family in Fonts in the seed, and keep the suitcases in `missingDefaults` and Restore Default Files like any default (step 3). A suitcase of a family the site doesn't serve installs nothing.
+- A storage seeded before `fonts` was named gets the Fonts folder at once, empty, so file the suitcases there once, as in step 4. A suitcase the site already stored elsewhere moves with `catalog.move`, which keeps its id, so its open window and its aliases follow.
+- Without `fonts` in `system`, every family the site serves is installed. A site that gives no fonts and names no Fonts folder sees no change.
+- An application opens a suitcase by saying it does (`opens: ['font']`). With none in `apps`, opening one raises the Finder's `no-application` alert, which `alertWith` can answer.
+
+### 6. Applications from app files
 
 An application built in its own repo ([An application in its own repo](#an-application-in-its-own-repo)) ships as an app file, one PNG. A site builds it in:
 
@@ -166,12 +200,13 @@ Give each application a directory of its own:
 - Its `id` never changes: saved icons, windows and sessions name it. Name its kinds after it.
 - Browsers keep ⌘N, ⌘W and ⌘Q, so use ⌃N, ⌃W and ⌃Q.
 - An application doesn't add items to the system menu. A site puts one in the Apple menu by filing an alias of it in Apple Menu Items ([step 4](#4-the-apple-menu-and-startup)).
+- Fonts are the system's. An application sets type in the families the site serves through `ctx.fonts`, and carries no strikes of its own: `installed()` and `onChange()` for a Font menu, and `load()` for a strike to set on its own elements ([SHELL.md § Fonts](./SHELL.md#fonts)). One that opens font suitcases says `opens: ['font']`; the kind is the shell's.
 - Modules that only compute, `layout.ts` say, import from `system-online-sdk/pure`, so their tests run under Node.
 - The shell draws no windows or dialogs of its own: every window and alert on screen belongs to an application. When an application needs something the shell doesn't do, change the SDK rather than working around it: ask for it as `feature-requests/<name>.md` in this repo. An ask about an element goes to vintage-frames.
 
 ## An application in its own repo
 
-An application that isn't one site's own lives in a repo of its own and ships as an app file: one PNG, whose picture is the application's box and whose chunks carry its manifest and its code ([APP-FILES.md](./APP-FILES.md)). A site builds it in from the file ([step 5](#5-applications-from-app-files)). [meteors-app](https://github.com/aportilla/meteors-app) is one. The application itself is written as [Writing an application](#writing-an-application) says; this section is what a repo of its own adds.
+An application that isn't one site's own lives in a repo of its own and ships as an app file: one PNG, whose picture is the application's box and whose chunks carry its manifest and its code ([APP-FILES.md](./APP-FILES.md)). A site builds it in from the file ([step 6](#6-applications-from-app-files)). [meteors-app](https://github.com/aportilla/meteors-app) is one. The application itself is written as [Writing an application](#writing-an-application) says; this section is what a repo of its own adds.
 
 ### Setup
 
@@ -290,6 +325,36 @@ if (import.meta.hot) import.meta.hot.dispose(() => shell.dispose())
 - The seed puts the application's icon on the desktop. Open it to try the application.
 - With the catalog in memory and no session, a reload starts over, and the application runs as it does on a site that saves nothing. `?save=1` keeps both, for trying what a reload reopens.
 
+An application that sets type in the system's fonts, or opens font suitcases, gives its dev desktop a few fonts as a site does ([step 5](#5-fonts)): a handful of families borrowed from a site into `dev/fonts/`, as `dev/art/` borrows its art, a Fonts folder, and a seed that files a suitcase of each there.
+
+```ts
+// dev/fonts.ts
+import type { FontFamily } from 'system-online-sdk/pure'
+import geneva9 from './fonts/Geneva-9.woff2'
+
+export const DEV_FONTS: FontFamily[] = [
+  { name: 'Geneva', strikes: [{ size: 9, line: 12, pitch: 12, url: geneva9, bytes: 3412, chars: 'ABC…' }] },
+]
+```
+
+```ts
+// dev/main.ts
+finder({
+  // …
+  system: { folder: 'System Folder', appleMenu: 'Apple Menu Items', startup: 'Startup Items', fonts: 'Fonts' },
+  seed: async (catalog) => {
+    for (const { name } of DEV_FONTS) {
+      await catalog.create({ kind: FONT_KIND, name, parent: FONTS, data: { family: name } })
+    }
+  },
+}),
+// … and beside `apps`:
+fonts: DEV_FONTS,
+```
+
+- To try a suitcase whose family the site doesn't serve, seed one naming a family `DEV_FONTS` leaves out.
+- The fonts stay in `dev/`, so the app file carries none.
+
 ### The release
 
 - `npm run build` writes `dist/<Name>.png`. Its `requires` is the repo's `system-online-sdk` range, a caret range the installed SDK has to meet, and its `api` the SDK's `APP_API`.
@@ -363,7 +428,7 @@ The shell and app files left vintage-frames for this repo on 2026-10-10. This se
 | `vintage-frames/build` | `system-online-sdk/build` |
 | `vintage-frames/build/client` | `system-online-sdk/build/client` |
 
-- `package.json`: `vintage-frames` to `^0.20.0`, and `system-online-sdk` at `^0.1.0` beside it, in the same block. Then `npm install`.
+- `package.json`: `vintage-frames` to `^0.20.0`, and `system-online-sdk` at `^0.2.0` beside it, in the same block. Then `npm install`. (meteors-app took `^0.1.0`, before system fonts.)
 - Every import and JSDoc type of the old entries. From the repo's root:
 
   ```sh
@@ -406,9 +471,11 @@ On vintage-frames `^0.17.0`. Beside the SDK, it takes everything vintage-frames 
 - **0.19.0** added the System Folder, aliases and Make Alias. It removed `ctx.systemItem` and `ctx.systemMenu`.
 - **0.19.1** added folder aliases, and submenus in every `vf-menu` and in the Apple menu.
 
+From 0.2.0 the shell owns the `font` kind ([SHELL.md § Fonts](./SHELL.md#fonts)), which SystemOnline's built-in Font Viewer registers. The shell leaves the viewer's kind out and says so in the console, and a suitcase opens nothing until an application says it opens suitcases. SystemOnline's own request, `feature-requests/font-viewer-app-file.md`, gives its system its fonts and takes the Font Viewer's app file in the same change as these steps.
+
 Steps, in order:
 
-1. **The packages**: in `dependencies`, `vintage-frames` to `^0.20.0`, and `system-online-sdk` `^0.1.0` beside it. `npm install`.
+1. **The packages**: in `dependencies`, `vintage-frames` to `^0.20.0`, and `system-online-sdk` `^0.2.0` beside it. `npm install`.
 2. **The renames**, over `src/`, `vite.config.ts` (`appFiles`), `tsconfig.json` (`system-online-sdk/build/client`) and the comment in `index.html`.
 3. **Meteors**: copy meteors-app's new `dist/Meteors.png`, Meteors 0.2.0, to `apps/`. The old file is format 1, and the build refuses it.
 4. **Desktop Patterns**, in `src/apps/desktop-patterns/index.ts`:
@@ -450,10 +517,11 @@ On vintage-frames `^0.16.2`. Beside the SDK, it takes:
 - **0.17.2 and 0.18.0**: a dialog shown again right after it closes now stays open, and `ctx.ask()` gets its answer. Nothing to change.
 - **0.19.0** removed `ctx.systemItem`, which Desktop Patterns calls. The Finder's File menu gains Make Alias (⌘M).
 - **0.19.1**: a menu now tracks the pointer while it's open, whether or not the button is down, and menus can nest.
+- **system-online-sdk 0.2.0** added the system's fonts. Nothing to change: a site that gives no fonts and names no Fonts folder sees none, and its kinds, `sprite` and `text`, aren't the shell's.
 
 Steps, in order:
 
-1. **The packages**: in `dependencies`, `vintage-frames` to `^0.20.0`, and `system-online-sdk` `^0.1.0` beside it. `npm install`.
+1. **The packages**: in `dependencies`, `vintage-frames` to `^0.20.0`, and `system-online-sdk` `^0.2.0` beside it. `npm install`.
 2. **The renames**, over `src/`, `test/` and the comment in `index.html`. The JSDoc types (`import('vintage-frames/shell').AppContext`) rename with them.
 3. **Desktop Patterns**, in `src/apps/desktop-patterns/index.js`: remove the `ctx.systemItem(...)` call and return `{ open: () => open() }` from `init`. Then choose one of these:
    - **An item of the site's own** (recommended, since it adds no System Folder to the desktop). In `index.html`, add `<vf-menu-item value="desktop-patterns">Desktop Patterns</vf-menu-item>` after the separator in `#menu-app`. In `main.js`, when that menu fires `vf-menu-select` with that value, call `shell.apps['desktop-patterns']?.open({})`. Ignore the pick while a modal dialog is open (`document.querySelector('vf-dialog[open]')`), as `ctx.systemItem` did.
@@ -470,7 +538,7 @@ Steps, in order:
 
 On vintage-frames `^0.17.0`, for the reader and, in its tests, the writer.
 
-1. **The packages**: in `devDependencies`, `system-online-sdk` `^0.1.0` in place of `vintage-frames`. npm installs vintage-frames with it, as the SDK's peer. `npm install`.
+1. **The packages**: in `devDependencies`, `system-online-sdk` `^0.2.0` in place of `vintage-frames`. npm installs vintage-frames with it, as the SDK's peer. `npm install`.
 2. **The renames**: `scripts/listing.ts`, `scripts/add.ts`, `scripts/versions.ts` and `test/listing.test.mjs`.
 3. **The store helpers** (kit-asks.md's store-helpers entry): drop `scripts/versions.ts`'s copy of the comparison for `compareVersions`, say why a file is refused with `inspectAppFile`, and list each version's description.
 4. **Levels**: list each build's `api` beside `requires`, and have `npm run check-index` ask for a build per level, not per kit minor.

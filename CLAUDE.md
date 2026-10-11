@@ -12,9 +12,9 @@ vintage-frames 0.19.1; that repo's history holds everything before.
 - `npm run dev` — Vite dev server on :5174 for the reference page
   (`index.html`, `demo/main.ts`). Not 5173, which is vintage-frames'.
 - `npm test` — the whole suite: `verify:unit` (Node unit tests in `test/`)
-  and three Playwright drivers over the reference page (`verify:front`,
-  `verify:windows`, `verify:finder`), in parallel against a server it starts
-  itself. Filter by name (`npm test -- finder`).
+  and four Playwright drivers over the reference page (`verify:front`,
+  `verify:windows`, `verify:finder`, `verify:fonts`), in parallel against a
+  server it starts itself. Filter by name (`npm test -- finder`).
 - `npm run verify:<name>` — one script against a dev server you started
 - `npm run typecheck` / `npm run build` (`dist/` and `app-api.json`)
 - `npm run check:app-api` — what changed in the app API since the last
@@ -27,11 +27,11 @@ vintage-frames 0.19.1; that repo's history holds everything before.
 
 - **A layer over vintage-frames.** The runtime (`src/*.ts`) imports the kit
   only as `vintage-frames`, its root, registers no elements, writes no styles
-  and ships no art. vintage-frames is a peer dependency, never a dependency:
-  a page loads one copy of the elements. `verify:unit` checks.
+  and ships no art or fonts. vintage-frames is a peer dependency, never a
+  dependency: a page loads one copy of the elements. `verify:unit` checks.
 - **The pure modules run under Node.** `src/app-file.ts`, `catalog.ts`,
-  `geometry.ts`, `state.ts`, `version.ts` and the entry `src/pure.ts` import
-  nothing of the kit and touch no DOM at import.
+  `fonts.ts`, `geometry.ts`, `state.ts`, `version.ts` and the entry
+  `src/pure.ts` import nothing of the kit and touch no DOM at import.
 - **The build entry runs under Node.** `src/build/` reaches no element and
   nothing that touches the DOM at import, no page imports it, and nothing in
   the runtime imports it.
@@ -73,14 +73,17 @@ the change.
   `system-online-sdk/pure`; `src/shell.ts` — `createShell`, `defineApp`;
   `src/windows.ts` — the window manager; `src/finder.ts` — the stock Finder;
   `src/catalog.ts`, `src/storage.ts` — the catalog and its storage;
+  `src/fonts.ts` — the system's fonts, which are installed (pure);
+  `src/strikes.ts` — loading a strike through the FontFace API;
   `src/state.ts` — the saved session; `src/geometry.ts`; `src/filing.ts` —
   filing by drag; `src/app-file.ts` — the app file reader and the levels
 - `src/build/` — `system-online-sdk/build`: the plugins, the packer, the box,
   its frame (`box/frame.png`), PNG pixels, and the faces as data
 - `test/*.test.mjs` — the unit tests; `scripts/` — the Playwright scripts,
   their harness, the test runner, the app API's list and its release check
-- `index.html`, `demo/` — the reference page; `demo/icons/` is its own art
-  and doesn't ship
+- `index.html`, `demo/` — the reference page; `demo/icons/` is its own art,
+  and `demo/fonts/` its system's fonts (vintage-frames' own faces): neither
+  ships
 - `docs/` — GUIDE (each kind of consumer step by step: a site, an
   application, one in its own repo, a tool that reads app files; moving to a
   new release; the sibling repos' moves onto the SDK), SHELL (the shell's

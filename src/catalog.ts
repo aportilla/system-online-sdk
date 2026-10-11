@@ -15,8 +15,9 @@
  *   volume's position is stored on a record of its own id.
  * - The System Folder is kept the same way when the site names it: a folder
  *   on the startup disk (the desktop without one) holding Apple Menu Items
- *   and Startup Items, listed after the volumes. What they hold is anyone's,
- *   and the shell reads it: the Apple menu, and what opens at startup.
+ *   and Startup Items, and Fonts when the site names it too, listed after
+ *   the volumes. What they hold is anyone's, and the shell reads it: the
+ *   Apple menu, what opens at startup, and the fonts installed.
  * - An alias stands for another item: its data names the original's id and
  *   kind, and `resolve` finds the original wherever it moved, until it is
  *   removed. An alias of a container takes a drop for its original, and
@@ -46,12 +47,16 @@ export const SYSTEM_FOLDER = 'system-folder'
 export const APPLE_MENU_ITEMS = 'apple-menu-items'
 /** Startup Items' id, in the System Folder: what it holds opens at startup. */
 export const STARTUP_ITEMS = 'startup-items'
+/** Fonts' id, in the System Folder when the site names it: a suitcase directly in it is installed. */
+export const FONTS = 'fonts'
 /** A folder's kind. */
 export const FOLDER = 'folder'
 /** An application's icon: the kind the shell registers, whose data names the application it opens. */
 export const APP_KIND = 'app'
 /** An alias: the kind the shell registers, whose data names the item it stands for. */
 export const ALIAS_KIND = 'alias'
+/** A font suitcase: the kind the shell registers, whose data names the family it holds. */
+export const FONT_KIND = 'font'
 
 /** The name a new folder takes, counted up where it is taken. */
 export const UNTITLED_FOLDER = 'untitled folder'
@@ -63,7 +68,7 @@ const SEEDED = '#seeded'
 export interface Item {
   id: string
   name: string
-  /** `folder`, a volume's (`trash`, `disk`), the shell's `app` or `alias`, or a kind an application registers. */
+  /** `folder`, a volume's (`trash`, `disk`), the shell's `app`, `alias` or `font`, or a kind an application registers. */
   kind: string
   /** A folder's id, a volume's, or null for the desktop. */
   parent: string | null
@@ -106,11 +111,13 @@ export interface Volumes {
   disk?: string | false
 }
 
-/** The System Folder and its two folders, by name. A site that names them has them. */
+/** The System Folder and its folders, by name. A site that names them has them. */
 export interface SystemFolders {
   folder: string
   appleMenu: string
   startup: string
+  /** Fonts, where a suitcase is installed. Unset, none, and every family the site serves is installed. */
+  fonts?: string
 }
 
 export interface CatalogOptions {
@@ -159,12 +166,19 @@ export const isVolume = (id: string | null | undefined): boolean => id === TRASH
  * copied or removed: a volume, the System Folder or a folder in it.
  */
 export const isKept = (id: string | null | undefined): boolean =>
-  isVolume(id) || id === SYSTEM_FOLDER || id === APPLE_MENU_ITEMS || id === STARTUP_ITEMS
+  isVolume(id) || id === SYSTEM_FOLDER || id === APPLE_MENU_ITEMS || id === STARTUP_ITEMS || id === FONTS
 
 /** The application an `app` item stands for: its `data.app`, or null. */
 export function appIdOf(item: Item): string | null {
   const data = item.data as { app?: unknown } | undefined
   return typeof data?.app === 'string' ? data.app : null
+}
+
+/** The family a suitcase holds: its `data.family`, or null for anything but a suitcase. */
+export function fontFamilyOf(item: Item): string | null {
+  if (item.kind !== FONT_KIND) return null
+  const data = item.data as { family?: unknown } | undefined
+  return typeof data?.family === 'string' ? data.family : null
 }
 
 /** The id of the item an alias stands for: its `data.original`, or null for anything but an alias. */
@@ -474,6 +488,7 @@ export function createCatalog(options: CatalogOptions): Catalog {
     keep(SYSTEM_FOLDER, system.folder, FOLDER, volumes.disk ? DISK : null)
     keep(APPLE_MENU_ITEMS, system.appleMenu, FOLDER, SYSTEM_FOLDER)
     keep(STARTUP_ITEMS, system.startup, FOLDER, SYSTEM_FOLDER)
+    if (system.fonts) keep(FONTS, system.fonts, FOLDER, SYSTEM_FOLDER)
   }
 
   /** Every stored record, by id, the marker aside. */

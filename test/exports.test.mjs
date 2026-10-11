@@ -34,7 +34,7 @@ test('nothing in the shell imports the build entry', () => {
   }
 })
 
-const PURE = ['./app-file.js', './catalog.js', './geometry.js', './state.js', './version.js']
+const PURE = ['./app-file.js', './catalog.js', './fonts.js', './geometry.js', './state.js', './version.js']
 
 test('the pure modules import nothing from the kit, so they run under Node', () => {
   for (const [file, src] of sources) {

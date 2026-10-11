@@ -23,6 +23,9 @@
  *   its original; an alias of a folder or the disk also files a drop into
  *   it. With the original gone, an alert says so. Make Alias makes one
  *   beside each selected application, document, folder or disk.
+ * - A suitcase, the shell's `font` kind, wears the site's suitcase art and
+ *   opens in the application that says it opens suitcases. With none, an
+ *   alert says so.
  * - Menus: File (Open, New Folder, Close, Make Alias), Edit (Copy, Paste,
  *   Select All), View (Arrange Windows), Special (Clean Up, Empty Trash…),
  *   each disabled while it has nothing to act on. A site switches commands
@@ -49,6 +52,8 @@ import {
   APP_KIND,
   DISK,
   FOLDER,
+  FONTS,
+  FONT_KIND,
   STARTUP_ITEMS,
   SYSTEM_FOLDER,
   TRASH,
@@ -105,10 +110,13 @@ export interface FinderArt {
   document: string
   /** The startup disk; the folder's art without it. */
   disk?: string
-  /** The System Folder and its two folders; the folder's art without them. */
+  /** The System Folder and its folders; the folder's art without them. */
   systemFolder?: string
   appleMenuItems?: string
   startupItems?: string
+  fonts?: string
+  /** A font suitcase, the shell's `font` kind; the document's art without it. */
+  suitcase?: string
   /** 12×12: the mark before the item count in the Trash's window and trashed folders. */
   trashMark?: string
   /** 32×32: beside the message in the Finder's alerts. Without it they have no art. */
@@ -132,6 +140,8 @@ export interface FinderAlerts {
   'move-failed': { error: Error }
   /** Opening an alias whose original is gone, or a drop onto an alias of a folder whose original is gone. */
   'original-missing': { alias: Item }
+  /** Opening a suitcase, through an alias too, while no application says it opens suitcases: the suitcase. */
+  'no-application': { item: Item }
   /** New Folder, Empty Trash, Paste, Make Alias or a dropped file failed. */
   failed: { action: FinderFailedAction; error: Error }
 }
@@ -216,15 +226,16 @@ export interface FinderOptions {
   volumes?: Volumes
   /**
    * The System Folder and its folders, named: what Apple Menu Items holds is
-   * the Apple menu, and what Startup Items holds opens at startup. Unset, none.
+   * the Apple menu, what Startup Items holds opens at startup, and a
+   * suitcase in Fonts is installed. Unset, none.
    */
   system?: SystemFolders
   /**
    * What the catalog starts with, stored once per storage: `'markup'` reads
-   * the `<vf-icon data-app>` and `<template data-folder="Name">` the page
-   * put in the desktop's field, and a `<template data-system="apple-menu-items">`
-   * files what it holds in that folder of the System Folder; a function
-   * stores the site's defaults.
+   * the `<vf-icon data-app>`, `<vf-icon data-font="Family">` and
+   * `<template data-folder="Name">` the page put in the desktop's field, and
+   * a `<template data-system="apple-menu-items">` files what it holds in that
+   * folder of the System Folder; a function stores the site's defaults.
    */
   seed?: 'markup' | ((catalog: Catalog) => void | Promise<void>)
   /** The lattices' cells, pitches and insets (default: 64px cells, 80px columns, 72px rows, 16px insets). */
@@ -300,7 +311,7 @@ const MENUS: { menu: FinderMenu; label: string; items: [FinderCommand, string, s
 ]
 
 /** The System Folder and its folders, the containers `template[data-system]` names. */
-const SYSTEM_FOLDERS: readonly string[] = [SYSTEM_FOLDER, APPLE_MENU_ITEMS, STARTUP_ITEMS]
+const SYSTEM_FOLDERS: readonly string[] = [SYSTEM_FOLDER, APPLE_MENU_ITEMS, STARTUP_ITEMS, FONTS]
 
 /** The commands that start a group of their own in their menu, after a separator. */
 const GROUPS = new Set<FinderCommand>(['close', 'make-alias'])
@@ -318,11 +329,12 @@ function menusFor(on: (cmd: FinderCommand) => boolean): string {
   }).join('')
 }
 
-/** A folder or application icon the page's markup declares, or what a kept folder holds. */
+/** A folder, application icon or suitcase the page's markup declares, or what a kept folder holds. */
 interface Declared {
-  kind: typeof FOLDER | typeof APP_KIND
+  kind: typeof FOLDER | typeof APP_KIND | typeof FONT_KIND
   name: string | null
   app?: string
+  family?: string
   at?: Point
   /** A kept folder's id: its children are filed there, and nothing is made for it. */
   into?: string
@@ -331,13 +343,13 @@ interface Declared {
 
 /** Whether `el` is a declaration the markup seed reads. */
 const isDeclaration = (el: Element): boolean =>
-  (el.localName === 'vf-icon' && (el as HTMLElement).dataset.app != null) ||
+  (el.localName === 'vf-icon' && ((el as HTMLElement).dataset.app != null || (el as HTMLElement).dataset.font != null)) ||
   (el instanceof HTMLTemplateElement && (el.dataset.folder != null || el.dataset.system != null))
 
 /**
- * The declarations in `root`: `vf-icon[data-app]` and `template[data-folder]`,
- * a folder's inside it, and `template[data-system]`, what a folder of the
- * System Folder holds.
+ * The declarations in `root`: `vf-icon[data-app]`, `vf-icon[data-font]` and
+ * `template[data-folder]`, a folder's inside it, and `template[data-system]`,
+ * what a folder of the System Folder holds.
  */
 function declarations(root: Element | DocumentFragment): Declared[] {
   const at = (left: string | null | undefined, top: string | null | undefined): Point | undefined =>
@@ -353,10 +365,11 @@ function declarations(root: Element | DocumentFragment): Declared[] {
         children: declarations(el.content),
       })
     } else {
+      const { app, font } = (el as HTMLElement).dataset
       out.push({
-        kind: APP_KIND,
+        kind: app != null ? APP_KIND : FONT_KIND,
         name: el.getAttribute('label'),
-        app: (el as HTMLElement).dataset.app,
+        ...(app != null ? { app } : { family: font }),
         at: at(el.getAttribute('left'), el.getAttribute('top')),
         children: [],
       })
@@ -388,10 +401,10 @@ export function finder(options: FinderOptions): AppDefinition<FinderApi> {
               }
               const made = await catalog.create({
                 kind: d.kind,
-                name: d.name ?? (d.app != null ? appName(d.app) : undefined),
+                name: d.name ?? (d.app != null ? appName(d.app) : d.family),
                 parent,
                 ...d.at,
-                ...(d.app != null ? { data: { app: d.app } } : {}),
+                ...(d.app != null ? { data: { app: d.app } } : d.family != null ? { data: { family: d.family } } : {}),
                 at: at++,
               })
               if (made && d.children.length) await store(d.children, made.id)
@@ -541,7 +554,9 @@ export function finder(options: FinderOptions): AppDefinition<FinderApi> {
         if (item.id === SYSTEM_FOLDER) return art.systemFolder ?? art.folder
         if (item.id === APPLE_MENU_ITEMS) return art.appleMenuItems ?? art.folder
         if (item.id === STARTUP_ITEMS) return art.startupItems ?? art.folder
+        if (item.id === FONTS) return art.fonts ?? art.folder
         if (item.kind === FOLDER) return art.folder
+        if (item.kind === FONT_KIND) return art.suitcase ?? art.document
         if (item.kind === TRASH) return itemCount(catalog.get(), TRASH) ? art.trashFull : art.trash
         if (item.kind === DISK) return art.disk ?? art.folder
         if (item.kind === ALIAS_KIND) {
@@ -786,7 +801,19 @@ export function finder(options: FinderOptions): AppDefinition<FinderApi> {
         )
       }
 
-      /** Open an item, an alias its original: a folder's window, or the item's kind. */
+      /** A suitcase was opened, and no application says it opens suitcases: say so. */
+      function noApplication(item: Item): void {
+        void alert(
+          'no-application',
+          { item },
+          `The document “${item.name}” could not be opened, because the application that opens it could not be found.`
+        )
+      }
+
+      /**
+       * Open an item, an alias its original: a folder's window, or the item's
+       * kind, which for a suitcase is the application that says it opens it.
+       */
       function openItem(id: string, from: VfViewportBox | null): void {
         const item = catalog.item(id)
         if (!item) return
@@ -797,6 +824,8 @@ export function finder(options: FinderOptions): AppDefinition<FinderApi> {
         }
         if (isContainerKind(target.kind)) {
           windows.open({ app: FINDER, item: target.id, from, create: () => makeFolderWindow(target.id) })
+        } else if (target.kind === FONT_KIND && !ctx.opener(FONT_KIND)) {
+          noApplication(target)
         } else {
           ctx.kind(target.kind)?.open(target, from)
         }

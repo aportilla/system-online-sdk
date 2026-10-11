@@ -1,17 +1,19 @@
 /**
  * `system-online-sdk` — the shell, experimental. Applications over one
  * desktop: a window manager, a menu bar that shows the front application's
- * menus, a catalog of what is where, and the stock Finder that shows it.
+ * menus, a catalog of what is where, the stock Finder that shows it, and the
+ * fonts the site gives its system.
  * Plain modules over vintage-frames' elements: it registers no elements,
- * writes no styles and ships no art, and it reaches the kit only through
- * `vintage-frames`' root exports, so the page imports `vintage-frames` first.
+ * writes no styles and ships no art or fonts, and it reaches the kit only
+ * through `vintage-frames`' root exports, so the page imports
+ * `vintage-frames` first.
  *
  * Its API may change in any minor release while it is experimental.
  * docs/SHELL.md is the reference.
  */
 
 export { createShell, defineApp } from './shell.js'
-export type { AppContext, AppDefinition, CatalogSetup, KindDefinition, Shell, ShellOptions } from './shell.js'
+export type { AppContext, AppDefinition, CatalogSetup, KindDefinition, Shell, ShellOptions, SystemFonts } from './shell.js'
 
 export { createWindowManager, focusInto } from './windows.js'
 export type {
@@ -60,6 +62,7 @@ export {
   descendantsOf,
   dropTargetOf,
   enclosingFolders,
+  fontFamilyOf,
   isContainerKind,
   isInside,
   isKept,
@@ -76,6 +79,8 @@ export {
   APP_KIND,
   DISK,
   FOLDER,
+  FONTS,
+  FONT_KIND,
   STARTUP_ITEMS,
   SYSTEM_FOLDER,
   TRASH,
@@ -96,6 +101,9 @@ export type {
   Volumes,
 } from './catalog.js'
 export { indexedDbStorage } from './storage.js'
+
+export { installedFamiliesOf } from './fonts.js'
+export type { FontFamily, FontStrike } from './fonts.js'
 
 export { localStorageState, mergeSession, openWindowsOf, readSession } from './state.js'
 export type { LocalStorageStateOptions, SavedSession, SavedWindow, SessionSnapshot, ShellState } from './state.js'

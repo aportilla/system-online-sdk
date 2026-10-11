@@ -135,6 +135,7 @@ The box is the SDK's frame with the application's artwork and text set into it. 
 - **Layout** is set on its own elements. No CSS import.
 - **Session keys** start with its id, read back defensively, and nothing breaks when `ctx.state` is null.
 - **Nothing site-specific** through the context: no `ctx.services`, no `ctx.apps`.
+- **Fonts are the system's**: it sets type in the families the site serves, reached through `ctx.fonts`, and carries no strikes. One that opens font suitcases says `opens: ['font']`, since the kind is the shell's ([SHELL.md § Fonts](./SHELL.md#fonts)).
 - **Its kinds** are named after its id, and **its id never changes**: saved icons, windows and sessions name it.
 
 The build checks the first three.
