@@ -1,2 +1,2 @@
 /** The SDK's version, as published: package.json's `version`. `npm version` rewrites it (the `version` script). */
-export const VERSION = '0.1.0'
+export const VERSION = '0.1.1'
