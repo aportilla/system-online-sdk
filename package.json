@@ -1,0 +1,79 @@
+{
+  "name": "system-online-sdk",
+  "version": "0.1.0",
+  "description": "Applications over a System 7 desktop: the shell, its Finder, and app files, on vintage-frames' elements",
+  "type": "module",
+  "license": "MIT",
+  "author": "Adam Portilla",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/aportilla/system-online-sdk.git"
+  },
+  "homepage": "https://github.com/aportilla/system-online-sdk#readme",
+  "bugs": "https://github.com/aportilla/system-online-sdk/issues",
+  "sideEffects": false,
+  "main": "./dist/index.js",
+  "module": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    },
+    "./pure": {
+      "types": "./dist/pure.d.ts",
+      "import": "./dist/pure.js"
+    },
+    "./build": {
+      "types": "./dist/build/index.d.ts",
+      "import": "./dist/build/index.js"
+    },
+    "./build/client": {
+      "types": "./dist/build/client.d.ts"
+    },
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "dist"
+  ],
+  "keywords": [
+    "system7",
+    "mac-os-classic",
+    "retro",
+    "desktop",
+    "window-manager",
+    "vintage-frames"
+  ],
+  "scripts": {
+    "test": "node scripts/test.mjs",
+    "dev": "vite",
+    "build": "rm -rf dist && tsc -p tsconfig.build.json && npm run analyze",
+    "typecheck": "tsc --noEmit",
+    "analyze": "node scripts/app-api.mjs",
+    "check:app-api": "npm run analyze && node scripts/check-app-api.mjs",
+    "prepack": "npm run build",
+    "preversion": "npm run check:app-api",
+    "version": "npm run analyze && node scripts/write-version.mjs && git add app-api.json src/version.ts",
+    "embed:frame": "node scripts/embed-frame.mjs",
+    "verify:unit": "tsc -p tsconfig.unit.json && node --test --test-reporter=tap \"test/*.test.mjs\"",
+    "verify:front": "node scripts/verify-front.mjs",
+    "verify:windows": "node scripts/verify-windows.mjs",
+    "verify:finder": "node scripts/verify-finder.mjs"
+  },
+  "peerDependencies": {
+    "vintage-frames": "^0.20.0",
+    "vite": ">=8.0.0"
+  },
+  "peerDependenciesMeta": {
+    "vite": {
+      "optional": true
+    }
+  },
+  "devDependencies": {
+    "@types/node": "^24.19.1",
+    "playwright": "^1.62.1",
+    "typescript": "^5.6.0",
+    "vintage-frames": "^0.20.0",
+    "vite": "^8.2.1"
+  }
+}

@@ -1,0 +1,10 @@
+node_modules/
+dist/
+*.local
+.DS_Store
+
+# verify:unit's compiled modules
+scripts/.tmp/
+
+# npm pack artifacts — a tarball is cut for a release, never kept in-tree
+*.tgz

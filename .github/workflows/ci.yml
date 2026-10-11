@@ -1,0 +1,52 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+# A newer push to the same branch makes the in-flight run pointless.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: .nvmrc
+          cache: npm
+
+      - run: npm ci
+
+      # Chromium only: every Playwright script drives it.
+      - name: Install Chromium
+        run: npx playwright install --with-deps chromium
+
+      - run: npm run typecheck
+
+      # Builds dist/ and regenerates app-api.json, so a change that only breaks
+      # the package build is caught here rather than at publish time.
+      - run: npm run build
+
+      # The app API's list is generated and committed. If `npm run build` just
+      # changed it, the committed copy was stale, which hides a change to what
+      # an application can use from the commit that makes it.
+      - name: Check app-api.json is current
+        run: |
+          if ! git diff --quiet -- app-api.json; then
+            echo "::error::app-api.json is stale — run 'npm run analyze' and commit the result."
+            git diff --stat -- app-api.json
+            exit 1
+          fi
+
+      # The suite. It starts and stops its own dev server.
+      - name: npm test
+        run: npm test
