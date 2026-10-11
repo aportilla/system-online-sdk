@@ -4,7 +4,7 @@
 
 The shell is experimental. Its API may change in any minor release until sprite-machine runs on all of it.
 
-[GUIDE.md](./GUIDE.md) walks through building a site in order, and moving one to a new release.
+[GUIDE.md](./GUIDE.md) gives the order to do things in: for a site, an application and a tool that reads app files, and for moving to a new release.
 
 ## Setup
 

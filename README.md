@@ -25,9 +25,15 @@ createShell(document.querySelector('vf-desktop'), {
 
 vintage-frames is a peer dependency: the page loads one copy of the elements, and the SDK names the range it takes. The shell is experimental, and its API may change in any minor release.
 
-- [docs/GUIDE.md](https://github.com/aportilla/system-online-sdk/blob/main/docs/GUIDE.md): a site on the shell step by step, an application in its own repo, and moving to a new release
-- [docs/SHELL.md](https://github.com/aportilla/system-online-sdk/blob/main/docs/SHELL.md): the shell's reference
-- [docs/APP-FILES.md](https://github.com/aportilla/system-online-sdk/blob/main/docs/APP-FILES.md): app files, the box, the plugins and the app API
+## Where to start
+
+| Building | Start at |
+| --- | --- |
+| A site: the page that hosts the desktop and chooses its applications | [GUIDE § A site in five steps](https://github.com/aportilla/system-online-sdk/blob/main/docs/GUIDE.md#a-site-in-five-steps) |
+| An application: a site's own, or one that ships as an app file from a repo of its own | [GUIDE § Writing an application](https://github.com/aportilla/system-online-sdk/blob/main/docs/GUIDE.md#writing-an-application), then [§ An application in its own repo](https://github.com/aportilla/system-online-sdk/blob/main/docs/GUIDE.md#an-application-in-its-own-repo) |
+| A tool that reads or writes app files: an index, a store | [GUIDE § A tool that reads app files](https://github.com/aportilla/system-online-sdk/blob/main/docs/GUIDE.md#a-tool-that-reads-app-files) |
+
+The references are [docs/SHELL.md](https://github.com/aportilla/system-online-sdk/blob/main/docs/SHELL.md), the shell's, and [docs/APP-FILES.md](https://github.com/aportilla/system-online-sdk/blob/main/docs/APP-FILES.md), for app files, the box, the plugins and the app API.
 
 ## License
 

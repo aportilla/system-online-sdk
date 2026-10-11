@@ -16,7 +16,7 @@ An application on the shell ships as one PNG, its app file. The picture is the a
   "format": 2,
   "id": "meteors",
   "name": "Meteors",
-  "version": "0.1.1",
+  "version": "0.2.0",
   "requires": "^0.1.0",
   "api": 3,
   "author": "Adam Portilla",

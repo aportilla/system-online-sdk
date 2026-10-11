@@ -33,20 +33,3 @@ APP_API_COMPATIBLE=1 npm version patch
 ```
 
 Run `npm run check:app-api` any time to see what changed since the last release.
-
-## The first publish, 0.1.0
-
-package.json already says 0.1.0, so the first release has no `npm version`. vintage-frames 0.20.0 has to be on npm first: the SDK's peer and dev ranges ask for it.
-
-```sh
-npm install              # writes package-lock.json against vintage-frames 0.20.0
-npm test
-npm run build            # app-api.json comes out unchanged
-git add -A && git commit -m "system-online-sdk 0.1.0"
-git tag -a v0.1.0 -m "system-online-sdk 0.1.0"
-git push -u origin main --follow-tags
-npm publish --dry-run    # dist/, README.md, LICENSE, package.json
-npm publish
-```
-
-The tag matters: the next release's app API check compares against the newest `v*` tag's `app-api.json`.

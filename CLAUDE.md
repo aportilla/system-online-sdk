@@ -81,8 +81,9 @@ the change.
   their harness, the test runner, the app API's list and its release check
 - `index.html`, `demo/` — the reference page; `demo/icons/` is its own art
   and doesn't ship
-- `docs/` — GUIDE (a site and an application step by step, moving to a new
-  release, and the sibling repos' moves onto the SDK), SHELL (the shell's
+- `docs/` — GUIDE (each kind of consumer step by step: a site, an
+  application, one in its own repo, a tool that reads app files; moving to a
+  new release; the sibling repos' moves onto the SDK), SHELL (the shell's
   reference), APP-FILES (the format, the box, the plugins, the app API),
   DEVELOPING, PUBLISHING
 - `README.md` — the storefront, shared by GitHub and npm

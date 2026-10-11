@@ -1,6 +1,14 @@
 # Using the SDK
 
-This guide covers building a site on `system-online-sdk`, building an application in a repo of its own, and moving either to a new release. [SHELL.md](./SHELL.md) documents every option and call, and [APP-FILES.md](./APP-FILES.md) the app file; this guide gives the order to do things in. The last section is the steps the existing repos take to move onto the SDK.
+The SDK has three kinds of consumer, and this guide gives each the order to do things in:
+
+| Building | Start at |
+| --- | --- |
+| **A site**: the page that hosts the desktop. It holds the menu bar and the Finder, chooses the applications and keeps the visitor's files. SystemOnline and Sprite Machine are sites. | [A site in five steps](#a-site-in-five-steps) |
+| **An application**: its windows, menus and documents on the desktop. A site's own lives in the site's repo. One in a repo of its own ships as an app file, as Meteors does. | [Writing an application](#writing-an-application), then for a repo of its own [An application in its own repo](#an-application-in-its-own-repo) |
+| **A tool that reads or writes app files**: an index, a store, a test. system-online-app-index is one. | [A tool that reads app files](#a-tool-that-reads-app-files) |
+
+[SHELL.md](./SHELL.md) documents every option and call, and [APP-FILES.md](./APP-FILES.md) the app file. [Moving to a new release](#moving-to-a-new-release) is for all three. The last section is the steps the existing repos take to move onto the SDK.
 
 ## A site in five steps
 
@@ -15,7 +23,7 @@ vintage-frames draws the elements; the SDK runs applications over them. The SDK 
 The page holds a `vf-desktop` with a `vf-menu-bar` and a `vf-icon-field`. The bar's first `vf-menu` is the system menu. The site supplies its items above the rule, About… for example.
 
 ```html
-<vf-desktop id="desktop" bezel="10">
+<vf-desktop bezel="10">
   <vf-menu-bar>
     <vf-menu id="menu-apple" label="Apple">
       <vf-menu-item value="about">About My Site…</vf-menu-item>
@@ -30,7 +38,7 @@ The page holds a `vf-desktop` with a `vf-menu-bar` and a `vf-icon-field`. The ba
 import 'vintage-frames'
 import { createShell, finder, indexedDbStorage, localStorageState } from 'system-online-sdk'
 
-const shell = createShell(document.getElementById('desktop')!, {
+const shell = createShell(document.querySelector('vf-desktop')!, {
   apps: [finder({ storage: indexedDbStorage('my-site'), art }), notePad],
   fit: 'viewport',
   state: localStorageState('my-site:desktop'),
@@ -50,22 +58,9 @@ if (import.meta.hot) import.meta.hot.dispose(() => shell.dispose())
 
 ### 2. Applications
 
-Both sites give each application its own directory:
+Write each application as [Writing an application](#writing-an-application) says, and pass them in `apps`. Keep each of the site's own in a directory under `src/apps/`. An application from another repo comes in from its app file (step 5).
 
-| File | |
-| --- | --- |
-| `index.ts` | `defineApp({ id, name, icon, menus, dialogs, windows, kinds, init })` |
-| `menus.html` | Its `vf-menu`s, each with a `data-menu` name. |
-| `dialogs.html` | Its dialogs, each with a `data-dialog` name, shown with `ctx.ask()`. |
-| `windows.html` | Its windows, each with a `data-window` name, copied with `ctx.window()`. |
-| `windows.ts` | What its windows hold and what their close boxes do. |
-| `layout.ts` | Where its windows go and their zoomed boxes. Pure. |
-
-- `init(ctx)` returns the application's actions. Return `open({ item, from })` so that the application can be opened from outside: from its icon, an alias, the Apple menu or Startup Items, and to reopen its windows after a reload. Without `open`, none of these do anything.
-- Give it a 32×32 `icon`, which its icon and its aliases show. Without one they show no art.
-- Browsers keep ⌘N, ⌘W and ⌘Q, so use ⌃N, ⌃W and ⌃Q.
-- An application doesn't add items to the system menu. To put one in the Apple menu, file an alias of it in Apple Menu Items (step 4).
-- The shell draws no windows or dialogs of its own: every window and alert on screen belongs to an application. When an application needs something the shell doesn't do, change the SDK rather than working around it in the site: ask for it as `feature-requests/<name>.md` in this repo. An ask about an element goes to vintage-frames.
+- `services` hands every application the site's own objects ([SHELL.md § Setup](./SHELL.md#setup)). An application from an app file uses none, so that it runs on any site.
 
 ### 3. Files
 
@@ -86,7 +81,7 @@ finder({
 ```
 
 - Each document type is a kind, which its application registers: `kinds: { note: { art, open, copy, onRemove, claim, export } }`. Small data goes in `item.data`. A large payload goes in the application's own store, keyed by the item's id.
-- The seed runs once per storage. Defaults added in a later release never reach an existing visitor through it. Store the missing defaults once at boot, and offer Special → Restore Default Files for anything the visitor removes later. Both sites keep a pure `missingDefaults(state, defaults)` that counts a trashed or renamed default as present, and a `restoreDefaults(catalog, defaults)` that stores whatever it finds missing.
+- The seed runs once per storage. Defaults added in a later release never reach an existing visitor through it. Store the missing defaults once at boot, and offer Special → Restore Default Files for anything the visitor removes later. Keep a pure `missingDefaults(state, defaults)` that counts a trashed or renamed default as present, and a `restoreDefaults(catalog, defaults)` that stores whatever it finds missing, as SystemOnline and Sprite Machine do.
 - Modules that work on the catalog import from `system-online-sdk/pure`, so their tests run under Node.
 
 ### 4. The Apple menu and startup
@@ -131,7 +126,7 @@ await catalog.create({
 
 ### 5. Applications from app files
 
-An application built in its own repo (next section) ships as an app file, one PNG. A site builds it in:
+An application built in its own repo ([An application in its own repo](#an-application-in-its-own-repo)) ships as an app file, one PNG. A site builds it in:
 
 ```ts
 // vite.config.ts
@@ -149,16 +144,70 @@ createShell(desktop, { apps: [finder({ storage, art }), meteors()] })
 - The site's build fails on an app file its SDK doesn't run, and names it.
 - Changes to the application are made in its repo, and the new file is copied into the site.
 
+## Writing an application
+
+An application is a definition, `defineApp({ … })`: its menus, dialogs and windows as markup, the kinds of document it opens, and an `init(ctx)` that sets them up. The same definition runs as a site's own and from an app file. [SHELL.md § Applications](./SHELL.md#applications) has its fields and its context, with an example, and the sections after it the dialogs, the windows and the catalog.
+
+Give each application a directory of its own:
+
+| File | |
+| --- | --- |
+| `index.ts` | `defineApp({ id, name, icon, menus, dialogs, windows, kinds, init })` |
+| `menus.html` | Its `vf-menu`s, each with a `data-menu` name. |
+| `dialogs.html` | Its dialogs, each with a `data-dialog` name, shown with `ctx.ask()`. |
+| `windows.html` | Its windows, each with a `data-window` name, copied with `ctx.window()`. |
+| `windows.ts` | What its windows hold and what their close boxes do. |
+| `layout.ts` | Where its windows go and their zoomed boxes. Pure. |
+
+`index.ts` imports the markup as `?raw` strings.
+
+- `init(ctx)` returns the application's actions. Return `open({ item, from })` so that the application can be opened from outside: from its icon, an alias, the Apple menu or Startup Items, and to reopen its windows after a reload. Without `open`, none of these do anything.
+- Give it a 32×32 `icon`, which its icon and its aliases show. Without one they show no art.
+- Its `id` never changes: saved icons, windows and sessions name it. Name its kinds after it.
+- Browsers keep ⌘N, ⌘W and ⌘Q, so use ⌃N, ⌃W and ⌃Q.
+- An application doesn't add items to the system menu. A site puts one in the Apple menu by filing an alias of it in Apple Menu Items ([step 4](#4-the-apple-menu-and-startup)).
+- Modules that only compute, `layout.ts` say, import from `system-online-sdk/pure`, so their tests run under Node.
+- The shell draws no windows or dialogs of its own: every window and alert on screen belongs to an application. When an application needs something the shell doesn't do, change the SDK rather than working around it: ask for it as `feature-requests/<name>.md` in this repo. An ask about an element goes to vintage-frames.
+
 ## An application in its own repo
+
+An application that isn't one site's own lives in a repo of its own and ships as an app file: one PNG, whose picture is the application's box and whose chunks carry its manifest and its code ([APP-FILES.md](./APP-FILES.md)). A site builds it in from the file ([step 5](#5-applications-from-app-files)). [meteors-app](https://github.com/aportilla/meteors-app) is one. The application itself is written as [Writing an application](#writing-an-application) says; this section is what a repo of its own adds.
+
+### Setup
 
 ```sh
 npm install -D system-online-sdk vintage-frames vite
 ```
 
+Both packages are dev dependencies: the app file carries neither, and the page that runs it brings its own. vintage-frames goes at the range the SDK's peer dependency names.
+
 ```ts
 // src/app.ts: the manifest's fields, one source for each
-export const APP = { id: 'meteors', name: 'Meteors', version: '0.1.1', author: 'Adam Portilla', description: '…' } as const
+export const APP = {
+  id: 'meteors',
+  name: 'Meteors',
+  version: '0.2.0',
+  author: 'Adam Portilla',
+  description: 'An Asteroids-style game on a 320 × 240 1-bit screen.',
+} as const
+```
 
+```ts
+// src/index.ts: the entry
+import { defineApp } from 'system-online-sdk'
+import menus from './menus.html?raw'
+import icon from './art/meteors.png'
+import { APP } from './app.ts'
+
+export function meteors() {
+  return defineApp({ id: APP.id, name: APP.name, icon, menus, init(ctx) { … } })
+}
+
+// The app file's code exports its factory by default.
+export default meteors
+```
+
+```ts
 // vite.config.ts
 import { defineConfig } from 'vite'
 import { appFile } from 'system-online-sdk/build'
@@ -169,16 +218,126 @@ export default defineConfig({
 })
 ```
 
-- `npm run build` writes `dist/<Name>.png`. Its `requires` is the repo's `system-online-sdk` range, and its `api` the SDK's level.
-- The code imports `vintage-frames`, `system-online-sdk`, `system-online-sdk/pure` and its own files, and nothing else. The build checks that and the other rules in [APP-FILES.md § The rules an application keeps](./APP-FILES.md#the-rules-an-application-keeps).
-- `npm run dev` can serve a desktop of the repo's own for trying the application, with the site's art if it borrows any. It never goes into the app file.
-- The release is the file. Copy it into each site's `apps/`, or set `copyTo`.
+- The entry's default export is the application's factory, a function that returns its definition. A site calls it to put the application in `apps`: `meteors()`.
+- The definition and `appFile()` both read `APP`, so the manifest and the application can't drift.
+- The code imports `vintage-frames`, `system-online-sdk`, `system-online-sdk/pure` and its own files, and nothing else. Art is imported, so the build inlines it. The build checks these and the other rules in [APP-FILES.md § The rules an application keeps](./APP-FILES.md#the-rules-an-application-keeps).
+- tsconfig's `types` takes `vite/client`, for the art and `?raw` imports.
+
+### A desktop to try it on
+
+`npm run dev` serves a desktop of the repo's own: the Finder with the application's icon on it, and the application from its source. It never goes into the app file, since `appFile()` changes `npm run build` alone.
+
+```html
+<!-- index.html -->
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <style>
+      html,
+      body {
+        margin: 0;
+        overflow: hidden;
+        background: #000;
+      }
+    </style>
+    <script type="module" src="/dev/main.ts"></script>
+  </head>
+  <body>
+    <vf-desktop bezel="10">
+      <vf-menu-bar>
+        <vf-menu label="Apple"></vf-menu>
+      </vf-menu-bar>
+      <vf-icon-field label="Desktop" fill-width fill-height></vf-icon-field>
+    </vf-desktop>
+  </body>
+</html>
+```
+
+```ts
+// dev/main.ts
+import 'vintage-frames'
+import { APP_KIND, createShell, finder, indexedDbStorage, localStorageState, memoryStorage } from 'system-online-sdk'
+import { APP } from '../src/app.ts'
+import { meteors } from '../src/index.ts'
+import folder from './art/folder.png'
+import trash from './art/trash.png'
+import trashFull from './art/trash-full.png'
+import documentArt from './art/document.png'
+
+// ?save=1 keeps the catalog and the session across a reload.
+const save = new URLSearchParams(location.search).get('save') === '1'
+
+const shell = createShell(document.querySelector('vf-desktop')!, {
+  apps: [
+    finder({
+      storage: save ? indexedDbStorage('meteors-app') : memoryStorage(),
+      art: { folder, trash, trashFull, document: documentArt },
+      seed: async (catalog) => {
+        await catalog.create({ kind: APP_KIND, name: APP.name, data: { app: APP.id } })
+      },
+    }),
+    meteors(),
+  ],
+  fit: 'viewport',
+  state: save ? localStorageState('meteors-app:desktop') : null,
+})
+
+if (import.meta.hot) import.meta.hot.dispose(() => shell.dispose())
+```
+
+- The Finder needs 32×32 art for `folder`, `trash`, `trashFull` and `document` ([SHELL.md § The Finder](./SHELL.md#the-finder)). Borrow a site's, and keep it in `dev/`.
+- The seed puts the application's icon on the desktop. Open it to try the application.
+- With the catalog in memory and no session, a reload starts over, and the application runs as it does on a site that saves nothing. `?save=1` keeps both, for trying what a reload reopens.
+
+### The release
+
+- `npm run build` writes `dist/<Name>.png`. Its `requires` is the repo's `system-online-sdk` range, a caret range the installed SDK has to meet, and its `api` the SDK's `APP_API`.
+- Read a built file back with the SDK's reader, from the repo's root:
+
+  ```sh
+  node --input-type=module -e "import { readFileSync } from 'node:fs'; import { inspectAppFile } from 'system-online-sdk/pure'; const read = await inspectAppFile(new Uint8Array(readFileSync('dist/Meteors.png'))); console.log(typeof read === 'string' ? read : { ...read.manifest, icon: '…' })"
+  ```
+
+  It prints the manifest, or why the file isn't an app file.
+- Give each release a new `version` in `src/app.ts`. An index puts an application's builds in order by it.
+- The release is the file. Copy it into each site's `apps/`, or set `copyTo` to write it there on every build. Nothing goes to npm.
+- A site runs the file when its SDK runs the file's `api`. When it doesn't, the site's build refuses the file and names the SDK to build it on.
+
+## A tool that reads app files
+
+A tool that reads app files, an index or a store say, needs `system-online-sdk/pure` alone. It runs under Node and touches no DOM.
+
+```sh
+npm install -D system-online-sdk
+```
+
+npm installs vintage-frames with it, as the SDK's peer, though the pure entry imports nothing of it.
+
+```ts
+import { readFile } from 'node:fs/promises'
+import { appRuns, compareVersions, inspectAppFile } from 'system-online-sdk/pure'
+
+const read = await inspectAppFile(new Uint8Array(await readFile('apps/Meteors.png')))
+if (typeof read === 'string') throw new Error(`Meteors.png is not an app file: ${read}`)
+const { manifest } = read // format, id, name, version, requires, api, author, description, icon
+
+const runs = appRuns(manifest) // whether this SDK runs it
+const order = ['0.10.0', '0.2.0'].sort(compareVersions) // ['0.2.0', '0.10.0']
+```
+
+- `inspectAppFile()` says why bytes aren't an app file, as the end of a sentence for people. `readAppFile()` gives `null` instead.
+- Whether a site runs a build turns on its `api` alone: a site runs `APP_API_OLDEST` to `APP_API` of its own SDK, and `appRuns()` checks a manifest against the SDK installed beside the tool. `requires` names the SDK range the build was made with.
+- A test makes its app files with `system-online-sdk/build`: `packApp({ manifest, icon, code })` writes a whole file, and `writeAppFile(box, manifest, code)` writes the chunks onto any PNG, a broken manifest included. That entry imports Vite's types alone, so a tool needs no Vite.
+- [APP-FILES.md § Pieces on their own](./APP-FILES.md#pieces-on-their-own) lists every function.
 
 ## Moving to a new release
 
 1. **Read what changed.** Read the SDK's log since your version, and vintage-frames' if the SDK moved its range. The diff of the SDK's `app-api.json` between two tags lists everything an application could use that changed or went away, the elements included: `git -C ../system-online-sdk diff v0.1.0 v0.2.0 -- app-api.json`. A `-` line is one of them.
 2. **Update app files first.** When the new SDK raises `APP_API_OLDEST`, the site's build refuses every app file built below it. Move each application's repo to the new SDK, build it, and copy its file in before moving the site.
 3. **Then the site.** Move `system-online-sdk` and `vintage-frames` together, to the vintage-frames range the SDK's peer dependency names. Fix what the logs name, run the gates, and check the result in a browser.
+
+A tool that reads app files moves its `system-online-sdk` range too, so that it reads what the new SDK writes.
 
 Before 1.0, any minor release can break the shell. The shell stays experimental until sprite-machine runs on all of it.
 
@@ -188,11 +347,11 @@ The shell and app files left vintage-frames for this repo on 2026-10-10. This se
 
 ### In order
 
-1. **vintage-frames 0.20.0** is published: the elements alone, without `vintage-frames/shell` and `vintage-frames/build`.
-2. **system-online-sdk 0.1.0** is published.
-3. **meteors-app** moves to the SDK and builds Meteors 0.1.1.
+1. **vintage-frames 0.20.0** is published: the elements alone, without `vintage-frames/shell` and `vintage-frames/build`. Done, 2026-10-11.
+2. **system-online-sdk 0.1.0** is published. Done, 2026-10-11.
+3. **meteors-app** moves to the SDK and builds Meteors 0.2.0.
 4. **SystemOnline** moves, with that Meteors.png.
-5. **sprite-machine** moves, any time after step 2.
+5. **sprite-machine** moves, any time now.
 6. **system-online-app-index** moves, any time after step 3.
 
 ### What changes in every repo
@@ -205,17 +364,17 @@ The shell and app files left vintage-frames for this repo on 2026-10-10. This se
 | `vintage-frames/build/client` | `system-online-sdk/build/client` |
 
 - `package.json`: `vintage-frames` to `^0.20.0`, and `system-online-sdk` at `^0.1.0` beside it, in the same block. Then `npm install`.
-- Every import and JSDoc type of the old entries. From the repo's root, run this over the folders that hold code, `src` and `test` here, and the config files that name an entry:
+- Every import and JSDoc type of the old entries. From the repo's root:
 
   ```sh
-  rg -l 'vintage-frames/(shell|build)' src test vite.config.ts tsconfig.json index.html \
+  rg -l -g '!*.md' 'vintage-frames/(shell|build)' \
     | xargs sed -i '' -e 's#vintage-frames/shell/pure#system-online-sdk/pure#g' \
                       -e 's#vintage-frames/shell#system-online-sdk#g' \
                       -e 's#vintage-frames/build#system-online-sdk/build#g'
   ```
 
-  It renames the entries in comments too. Read the diff before committing.
-- The repo's CLAUDE.md, README and docs: the shell is `system-online-sdk` now, and its guide is this repo's docs/SHELL.md. An ask about the shell or app files goes to this repo's `feature-requests/`; an ask about an element still goes to vintage-frames.
+  It rewrites every file but Markdown that names an old entry, configs and comments included, and skips what `.gitignore` lists, `node_modules` and `dist` among them. `sed -i ''` is macOS's; GNU sed takes `-i` alone. Read the diff before committing.
+- The Markdown is done by hand, since a plan or a record keeps its history as written. In the repo's CLAUDE.md, README and current docs, the shell is `system-online-sdk` now, and its guides are this repo's docs: `../system-online-sdk/docs/` in a checkout beside it, or [on GitHub](https://github.com/aportilla/system-online-sdk/tree/main/docs). An ask about the shell or app files goes to this repo's `feature-requests/`; an ask about an element still goes to vintage-frames.
 
 What changes for applications:
 
@@ -225,14 +384,19 @@ What changes for applications:
 
 ### meteors-app
 
-On vintage-frames `^0.17.0`.
+On vintage-frames `^0.17.0`. Its code needs nothing but the renames: on the SDK it typechecks, passes `npm test`, builds and runs on its dev desktop as before.
 
-1. `package.json`: `vintage-frames` to `^0.20.0`, and `system-online-sdk` `^0.1.0` beside it in `devDependencies`. `npm install`.
-2. The renames: `src/index.ts`, `src/screen.ts`, `dev/main.ts` and `vite.config.ts`.
-3. `src/app.ts`: `version` to `0.1.1`, and a `description`.
-4. Run `npm run typecheck`, `npm test` and `npm run build`. `dist/Meteors.png` is format 2, with `requires: ^0.1.0` and `api: 3`. Copy it to SystemOnline's `apps/`.
-5. `CLAUDE.md` and `README.md`: the shell and `appFile()` are system-online-sdk's, and `requires` comes from the `system-online-sdk` dev dependency's range. Asks about the shell or app files go to this repo's `feature-requests/`.
-6. Check by eye on the dev desktop: the game runs, and its window opens and closes.
+1. **The packages**: in `devDependencies`, `vintage-frames` to `^0.20.0`, and `system-online-sdk` `^0.1.0` beside it. `npm install`.
+2. **The renames** ([What changes in every repo](#what-changes-in-every-repo)). They touch `src/index.ts`, `src/screen.ts`, `dev/main.ts` and `vite.config.ts`.
+3. **`src/app.ts`**: `version` to `0.2.0`. CLAUDE.md's rule takes a minor when the range moves, and `requires` now comes from the `system-online-sdk` range. Add a `description`, the README's first line: `'An Asteroids-style game on a 320 × 240 1-bit screen.'`
+4. **The gates**: `npm run typecheck`, `npm test` and `npm run build`. Then read `dist/Meteors.png` back ([The release](#the-release)): format 2, version 0.2.0, `requires` `^0.1.0`, `api` 3.
+5. **Leave SystemOnline's `apps/` alone.** Its build, still on vintage-frames, can't read a format 2 file, so the copy waits for its own move ([SystemOnline](#systemonline), step 3).
+6. **Docs and comments**: `rg -n 'kit|vintage-frames' CLAUDE.md README.md index.html dev vite.config.ts` finds each mention of the kit's shell, its build and its docs.
+   - `CLAUDE.md`: the shell and `appFile()`, with the frame and the packer, are system-online-sdk's, and its `docs/APP-FILES.md` is the format's guide. An app file imports `vintage-frames`, `system-online-sdk` and `system-online-sdk/pure`; a module under test imports nothing of either package but `system-online-sdk/pure`. `requires` comes from the `system-online-sdk` dev dependency's range, and the rule for each kit minor becomes the rule for each SDK minor, which also moves vintage-frames to the range the SDK's peer names. An ask about the shell or app files goes to system-online-sdk's `feature-requests/`, and one about an element to vintage-frames'.
+   - `README.md`: Meteors is built on system-online-sdk and vintage-frames. The dev desktop's Finder, `appFile()` and the packer are the SDK's, and its `docs/APP-FILES.md` is the format's guide.
+   - The comments in `index.html`, `dev/main.ts` and `vite.config.ts` that give the shell, the Finder or the build to the kit: they are the SDK's.
+   - `docs/meteors-plan.md` is the plan the game was built from. Leave it as written.
+7. **Check in a browser**, on the dev desktop (`npm run dev`): Meteors opens from its icon, a game plays, ⌃W closes the window into the icon, and with `?save=1` a reload reopens it.
 
 ### SystemOnline
 
@@ -246,7 +410,7 @@ Steps, in order:
 
 1. **The packages**: in `dependencies`, `vintage-frames` to `^0.20.0`, and `system-online-sdk` `^0.1.0` beside it. `npm install`.
 2. **The renames**, over `src/`, `vite.config.ts` (`appFiles`), `tsconfig.json` (`system-online-sdk/build/client`) and the comment in `index.html`.
-3. **Meteors**: copy meteors-app's new `dist/Meteors.png` to `apps/`. The old file is format 1, and the build refuses it.
+3. **Meteors**: copy meteors-app's new `dist/Meteors.png`, Meteors 0.2.0, to `apps/`. The old file is format 1, and the build refuses it.
 4. **Desktop Patterns**, in `src/apps/desktop-patterns/index.ts`:
    - Remove the `ctx.systemItem(...)` call.
    - Return `{ open: () => open() }` from `init`, so its icon and its alias open the panel.
@@ -310,5 +474,5 @@ On vintage-frames `^0.17.0`, for the reader and, in its tests, the writer.
 2. **The renames**: `scripts/listing.ts`, `scripts/add.ts`, `scripts/versions.ts` and `test/listing.test.mjs`.
 3. **The store helpers** (kit-asks.md's store-helpers entry): drop `scripts/versions.ts`'s copy of the comparison for `compareVersions`, say why a file is refused with `inspectAppFile`, and list each version's description.
 4. **Levels**: list each build's `api` beside `requires`, and have `npm run check-index` ask for a build per level, not per kit minor.
-5. **Format 1 files no longer read**: the build refuses Meteors 0.1.0's file, saying to build it again. Take it out, and add Meteors 0.1.1 from meteors-app.
+5. **Format 1 files no longer read**: the build refuses Meteors 0.1.0's file, saying to build it again. Take it out, and add Meteors 0.2.0 from meteors-app.
 6. `CLAUDE.md` and `README.md`: the format's guide is this repo's docs/APP-FILES.md.
