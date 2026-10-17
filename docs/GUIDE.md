@@ -415,7 +415,7 @@ The shell and app files left vintage-frames for this repo on 2026-10-10. This se
 1. **vintage-frames 0.20.0** is published: the elements alone, without `vintage-frames/shell` and `vintage-frames/build`. Done, 2026-10-11.
 2. **system-online-sdk 0.1.0** is published. Done, 2026-10-11.
 3. **meteors-app** moves to the SDK and builds Meteors 0.2.0. Done, 2026-10-11.
-4. **SystemOnline** moves, with that Meteors.png.
+4. **SystemOnline** moves, with that Meteors.png. Done, 2026-10-11.
 5. **sprite-machine** moves, any time now.
 6. **system-online-app-index** moves, any time after step 3. Done, 2026-10-17, with Meteors 0.3.0 and the other three applications' current builds.
 
