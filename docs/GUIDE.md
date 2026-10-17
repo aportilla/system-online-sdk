@@ -393,7 +393,7 @@ const order = ['0.10.0', '0.2.0'].sort(compareVersions) // ['0.2.0', '0.10.0']
 
 - `inspectAppFile()` says why bytes aren't an app file, as the end of a sentence for people. `readAppFile()` gives `null` instead.
 - Whether a site runs a build turns on its `api` alone: a site runs `APP_API_OLDEST` to `APP_API` of its own SDK, and `appRuns()` checks a manifest against the SDK installed beside the tool. `requires` names the SDK range the build was made with.
-- A test makes its app files with `system-online-sdk/build`: `packApp({ manifest, icon, code })` writes a whole file, and `writeAppFile(box, manifest, code)` writes the chunks onto any PNG, a broken manifest included. That entry imports Vite's types alone, so a tool needs no Vite.
+- A test makes its app files with `system-online-sdk/build`: `packApp({ manifest, icon, code })` writes a whole file, and `writeAppFile(box, manifest, code)` writes the chunks onto any PNG. Both throw on a manifest the reader would refuse, so neither writes a broken one. That entry imports Vite's types alone, so a tool needs no Vite.
 - [APP-FILES.md § Pieces on their own](./APP-FILES.md#pieces-on-their-own) lists every function.
 
 ## Moving to a new release
@@ -417,7 +417,7 @@ The shell and app files left vintage-frames for this repo on 2026-10-10. This se
 3. **meteors-app** moves to the SDK and builds Meteors 0.2.0. Done, 2026-10-11.
 4. **SystemOnline** moves, with that Meteors.png.
 5. **sprite-machine** moves, any time now.
-6. **system-online-app-index** moves, any time after step 3.
+6. **system-online-app-index** moves, any time after step 3. Done, 2026-10-17, with Meteors 0.3.0 and the other three applications' current builds.
 
 ### What changes in every repo
 
@@ -541,6 +541,6 @@ On vintage-frames `^0.17.0`, for the reader and, in its tests, the writer.
 1. **The packages**: in `devDependencies`, `system-online-sdk` `^0.2.0` in place of `vintage-frames`. npm installs vintage-frames with it, as the SDK's peer. `npm install`.
 2. **The renames**: `scripts/listing.ts`, `scripts/add.ts`, `scripts/versions.ts` and `test/listing.test.mjs`.
 3. **The store helpers** (kit-asks.md's store-helpers entry): drop `scripts/versions.ts`'s copy of the comparison for `compareVersions`, say why a file is refused with `inspectAppFile`, and list each version's description.
-4. **Levels**: list each build's `api` beside `requires`, and have `npm run check-index` ask for a build per level, not per kit minor.
+4. **Levels**: list each build's `api` beside `requires`, and keep a build for each level, not each kit minor. The check that the index holds one, `npm run check-index`, is SystemOnline's, in the App Store plan's step 6.
 5. **Format 1 files no longer read**: the build refuses Meteors 0.1.0's file, saying to build it again. Take it out, and add Meteors 0.2.0 from meteors-app.
 6. `CLAUDE.md` and `README.md`: the format's guide is this repo's docs/APP-FILES.md.
