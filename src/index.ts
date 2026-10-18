@@ -1,8 +1,8 @@
 /**
  * `system-online-sdk` — the shell, experimental. Applications over one
  * desktop: a window manager, a menu bar that shows the front application's
- * menus, a catalog of what is where, the stock Finder that shows it, and the
- * fonts the site gives its system.
+ * menus, a catalog of what is where, the stock Finder that shows it, the
+ * fonts the site gives its system, and app files installed at runtime.
  * Plain modules over vintage-frames' elements: it registers no elements,
  * writes no styles and ships no art or fonts, and it reaches the kit only
  * through `vintage-frames`' root exports, so the page imports
@@ -14,6 +14,15 @@
 
 export { createShell, defineApp } from './shell.js'
 export type { AppContext, AppDefinition, CatalogSetup, KindDefinition, Shell, ShellOptions, SystemFonts } from './shell.js'
+export type {
+  Install,
+  InstallOptions,
+  InstallRefusal,
+  InstallResult,
+  InstalledApp,
+  SkipReason,
+  UninstallResult,
+} from './installs.js'
 
 export { createWindowManager, focusInto } from './windows.js'
 export type {
@@ -43,6 +52,7 @@ export type {
   FinderMenu,
   FinderOpen,
   FinderOptions,
+  UnavailableReason,
 } from './finder.js'
 
 export { fileByDrag } from './filing.js'
@@ -162,10 +172,12 @@ export {
   APP_FILE_FORMAT,
   BOX_SCALE,
   appRuns,
+  checkSignature,
   compareVersions,
   inspectAppFile,
+  judgeSignature,
   readAppFile,
   satisfies,
 } from './app-file.js'
-export type { AppFile, AppManifest } from './app-file.js'
+export type { AppFile, AppManifest, SignatureCheck, Standing, Trust, TrustAnswer } from './app-file.js'
 export { VERSION } from './version.js'

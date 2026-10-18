@@ -1,6 +1,6 @@
 # system-online-sdk
 
-Applications over a System 7 desktop, on the [vintage-frames](https://github.com/aportilla/vintage-frames) elements. The shell runs them: a window manager, a menu bar that shows the front application's menus, a catalog of what is where, and a stock Finder with folders, aliases, filing, Clean Up and the Trash. A System Folder's contents set the Apple menu, what opens at startup and the fonts installed, which every application can set type in. An application can ship as one PNG, its app file, which the SDK's Vite plugins write and build into a site.
+Applications over a System 7 desktop, on the [vintage-frames](https://github.com/aportilla/vintage-frames) elements. The shell runs them: a window manager, a menu bar that shows the front application's menus, a catalog of what is where, and a stock Finder with folders, aliases, filing, Clean Up and the Trash. A System Folder's contents set the Apple menu, what opens at startup and the fonts installed, which every application can set type in. An application can ship as one PNG, its app file, which the SDK's Vite plugins write and build into a site. A desktop can also install one while it runs, dropped on it or from a store, checked against the signatures the site trusts, and uninstall it with Empty Trash.
 
 ```sh
 npm install system-online-sdk vintage-frames
@@ -18,10 +18,10 @@ createShell(document.querySelector('vf-desktop'), {
 
 | Entry | |
 | --- | --- |
-| `system-online-sdk` | The shell: `createShell`, `defineApp`, the window manager, the stock Finder, the catalog and its storage, the saved session. |
-| `system-online-sdk/pure` | The catalog, the system's fonts' rule and types, the geometry, the saved session and the app file reader. No DOM and no elements, so they run under Node. |
-| `system-online-sdk/build` | `appFile()` and `appFiles()`, the Vite plugins that write app files and build them into a site, and the packer. Build only. |
-| `system-online-sdk/build/client` | The types of a `*.png?app` import. |
+| `system-online-sdk` | The shell: `createShell`, `defineApp`, the window manager, the stock Finder, the catalog and its storage, the saved session, installing app files at runtime. |
+| `system-online-sdk/pure` | The catalog, the system's fonts' rule and types, the geometry, the saved session, the app file reader and its signature check. No DOM and no elements, so they run under Node. |
+| `system-online-sdk/build` | `appFile()` and `appFiles()`, the Vite plugins that write app files and build them into a site or serve them to it, the packer and the signer. Build only. |
+| `system-online-sdk/build/client` | The types of the `*.png?app` and `*.png?app-file` imports. |
 
 vintage-frames is a peer dependency: the page loads one copy of the elements, and the SDK names the range it takes. The shell is experimental, and its API may change in any minor release.
 

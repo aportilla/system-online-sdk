@@ -24,12 +24,16 @@
  *   keeps taking one, to say so, once the original is gone.
  * - A folder never goes into itself or a folder inside it. A parent with no
  *   record reads as the desktop.
- * - An item whose kind no application registers is left out of the listing
- *   and kept in storage.
+ * - Every item is listed, whether or not an application registers its kind:
+ *   a document outlives the application that opens it.
  * - Storage is three calls over item records (list, put, remove). The
  *   catalog holds every record in memory, writes through to storage, and
  *   lists from memory; a position change writes after a short delay, since
  *   the resize rule moves every desktop icon on each resize event.
+ * - A record whose id starts with `#` is the shell's own, kept beside the
+ *   items in the same storage: the seed's marker, and each installed
+ *   application's file. The catalog never lists, dumps, imports or clears
+ *   one.
  * - A seed runs once per storage: a persistent one stores a marker record
  *   (`#seeded`), so a site that starts in memory and switches its storage
  *   seeds once there.
@@ -63,6 +67,9 @@ export const UNTITLED_FOLDER = 'untitled folder'
 
 /** The marker record a seeded storage holds. */
 const SEEDED = '#seeded'
+
+/** Whether a stored record is one of the shell's own, beside the items: its id starts with `#`. */
+const isShellRecord = (id: string): boolean => id.startsWith('#')
 
 /** One item of the catalog. */
 export interface Item {
@@ -125,9 +132,7 @@ export interface CatalogOptions {
   volumes?: Volumes
   /** The System Folder, on the startup disk. Unset, none. */
   system?: SystemFolders
-  /** Whether an application registers `kind`. Folders are always listed. Default: every kind. */
-  listed?(kind: string): boolean
-  /** A kind's payload hooks. */
+  /** A kind's payload hooks: undefined for a kind no application registers. */
   hooks?(kind: string): KindHooks | undefined
   now?(): number
   newId?(): string
@@ -443,6 +448,7 @@ export interface Catalog {
   place(positions: ReadonlyMap<string, Point>): void
   flush(): Promise<void>
   copy(ids: readonly string[], parent: string | null): Promise<Item[]>
+  remove(ids: readonly string[]): Promise<Item[]>
   emptyTrash(): Promise<Item[]>
   trashSize(): number
   dump(): CatalogArchive
@@ -467,14 +473,7 @@ function withPosition(item: Item, at: Point | null | undefined): Item {
 }
 
 export function createCatalog(options: CatalogOptions): Catalog {
-  const {
-    storage,
-    volumes = {},
-    system,
-    listed = () => true,
-    hooks = () => undefined,
-    placeDelay = 400,
-  } = options
+  const { storage, volumes = {}, system, hooks = () => undefined, placeDelay = 400 } = options
   const now = () => (options.now ?? Date.now)()
   const newId = () => (options.newId ? options.newId() : crypto.randomUUID())
 
@@ -491,7 +490,7 @@ export function createCatalog(options: CatalogOptions): Catalog {
     if (system.fonts) keep(FONTS, system.fonts, FOLDER, SYSTEM_FOLDER)
   }
 
-  /** Every stored record, by id, the marker aside. */
+  /** Every stored item record, by id: the shell's own records aside. */
   let records = new Map<string, Item>()
   let available = false
   let seeded = false
@@ -505,9 +504,8 @@ export function createCatalog(options: CatalogOptions): Catalog {
         ? { ...v, left: stored.left, top: stored.top }
         : v
     })
-    const rows = [...records.values()]
-      .filter((r) => !isKept(r.id) && (r.kind === FOLDER || listed(r.kind)))
-      .sort(byCreation)
+    // A volume's kind on any record but a volume's is no item's.
+    const rows = [...records.values()].filter((r) => !isKept(r.id) && r.kind !== TRASH && r.kind !== DISK).sort(byCreation)
     return { available, items: [...kept, ...rows] }
   }
 
@@ -548,15 +546,27 @@ export function createCatalog(options: CatalogOptions): Catalog {
     return records.get(id) ?? { ...row, name: '' }
   }
 
-  /** Remove every stored record but the marker, unannounced. */
+  /** Remove every stored item record, unannounced: the shell's own records stay. */
   async function wipe(): Promise<void> {
     pendingPlaces.clear()
     for (const r of await store().list()) {
-      if (r.id === SEEDED) continue
+      if (isShellRecord(r.id)) continue
       await store().remove(r.id)
       records.delete(r.id)
     }
     records = new Map()
+  }
+
+  /** Remove items from storage, each kind dropping its payload, and announce once. */
+  async function removeAll(items: readonly Item[]): Promise<Item[]> {
+    for (const item of items) {
+      await store().remove(item.id)
+      records.delete(item.id)
+      pendingPlaces.delete(item.id)
+      await hooks(item.kind)?.onRemove?.(item)
+    }
+    if (items.length) changed()
+    return [...items]
   }
 
   const api: Catalog = {
@@ -585,7 +595,7 @@ export function createCatalog(options: CatalogOptions): Catalog {
         seeded = false
         for (const r of list) {
           if (r.id === SEEDED) seeded = true
-          else records.set(r.id, r)
+          else if (!isShellRecord(r.id)) records.set(r.id, r)
         }
         available = true
       } catch (err) {
@@ -742,17 +752,25 @@ export function createCatalog(options: CatalogOptions): Catalog {
       return tops
     },
 
+    /**
+     * Remove items at once, wherever they are, the Trash included, a folder
+     * with everything inside it; each kind drops its payload. Never a kept
+     * container. Resolves what went. An uninstall removes an application's
+     * icons this way; anything a visitor deletes goes through the Trash.
+     */
+    async remove(ids: readonly string[]): Promise<Item[]> {
+      const gone = new Map<string, Item>()
+      for (const id of ids) {
+        const item = itemOf(state, id)
+        if (!item || isKept(id)) continue
+        for (const it of [item, ...(isContainerKind(item.kind) ? descendantsOf(state, id) : [])]) gone.set(it.id, it)
+      }
+      return removeAll([...gone.values()])
+    },
+
     /** Remove everything in the Trash, each kind dropping its payload. Resolves what went. */
     async emptyTrash(): Promise<Item[]> {
-      const gone = descendantsOf(state, TRASH)
-      for (const item of gone) {
-        await store().remove(item.id)
-        records.delete(item.id)
-        pendingPlaces.delete(item.id)
-        await hooks(item.kind)?.onRemove?.(item)
-      }
-      if (gone.length) changed()
-      return gone
+      return removeAll(descendantsOf(state, TRASH))
     },
 
     /** Bytes in the Trash, by the kinds' `size`. */
@@ -760,12 +778,12 @@ export function createCatalog(options: CatalogOptions): Catalog {
       return descendantsOf(state, TRASH).reduce((sum, i) => sum + (hooks(i.kind)?.size?.(i) ?? 0), 0)
     },
 
-    /** Every record, listed or not, for a backup. */
+    /** Every item record, kept containers' places included, for a backup. The shell's own records aren't items. */
     dump(): CatalogArchive {
       return { items: [...records.values()] }
     },
 
-    /** Remove every record, listed or not; the storage stays seeded. */
+    /** Remove every item record; the storage stays seeded, and the shell's own records stay. */
     async clear(): Promise<void> {
       if (!storage) return
       try {
@@ -791,7 +809,7 @@ export function createCatalog(options: CatalogOptions): Catalog {
       { mode = 'merge' }: { mode?: 'merge' | 'replace' } = {}
     ): Promise<Map<string, Item>> {
       const stored = new Map<string, Item>()
-      const rows = archive.items.filter((r) => r.id !== SEEDED && !isKept(r.id))
+      const rows = archive.items.filter((r) => !isShellRecord(r.id) && !isKept(r.id))
       if (!rows.length || !storage) return stored
       const replace = mode === 'replace'
       const ids = new Map<string, string>()

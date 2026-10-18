@@ -1,14 +1,18 @@
 /**
  * App files: an application as one PNG. The picture is the application's
  * box; two iTXt chunks before IEND carry its manifest, as JSON, and its code,
- * one ES module compressed with zlib. Any PNG tool reads the chunks and any
+ * one ES module compressed with zlib. A third, when the file is signed,
+ * carries an Ed25519 signature over every byte of the file but its own chunk,
+ * and the public key that made it. Any PNG tool reads the chunks and any
  * decoder skips them.
  *
- * This is the reading half: the reader, checking a version against a range,
- * putting versions in order, the app API levels and whether this SDK runs an
+ * This is the reading half: the reader, checking a signature and what a
+ * site's trust says of it, checking a version against a range, putting
+ * versions in order, the app API levels and whether this SDK runs an
  * application, and the scale every box is drawn at. It is pure and runs the
- * same under Node and in a page, through the platform's compression streams.
- * Writing an app file, and the box, are `system-online-sdk/build`'s.
+ * same under Node and in a page, through the platform's compression streams
+ * and WebCrypto. Writing an app file, signing one, and the box, are
+ * `system-online-sdk/build`'s.
  */
 
 /** The app file format this SDK reads and writes. */
@@ -33,6 +37,9 @@ export const BOX_SCALE = 3
 /** The iTXt keywords of the manifest's chunk and the code's. */
 export const MANIFEST_KEYWORD = 'system-online.app'
 export const CODE_KEYWORD = 'system-online.code'
+
+/** The iTXt keyword of the signature's chunk. */
+export const SIGNATURE_KEYWORD = 'system-online.signature'
 
 /** The manifest's keyword in format 1, which vintage-frames wrote before the SDK. */
 const FORMAT_1_KEYWORD = 'vintage-frames.app'
@@ -223,6 +230,308 @@ export async function inspectAppFile(bytes: Uint8Array): Promise<AppFile | strin
 export async function readAppFile(bytes: Uint8Array): Promise<AppFile | null> {
   const file = await inspectAppFile(bytes)
   return typeof file === 'string' ? null : file
+}
+
+/**
+ * Whether a PNG carries an app file's chunks, readable or not: its manifest,
+ * its code or its signature, or format 1's manifest. A picture that carries
+ * none is any other PNG.
+ */
+export function carriesApp(bytes: Uint8Array): boolean {
+  if (bytes.length < 8 || PNG_SIGNATURE.some((b, i) => bytes[i] !== b)) return false
+  // A chunk's type is followed by its data, an iTXt's by its keyword; a CRC
+  // gone wrong or a length cut short leaves the bytes where they were.
+  const text = latin1.decode(bytes)
+  return ['iTXtsystem-online.', `iTXt${FORMAT_1_KEYWORD}`].some((mark) => text.includes(mark))
+}
+
+const latin1 = new TextDecoder('latin1')
+
+/* ── Signatures ─────────────────────────────────────────────────────────── */
+
+/** The algorithm an app file is signed with. */
+export const SIGNATURE_ALGORITHM = 'Ed25519'
+
+/**
+ * What an app file's signature says. `unsigned`: it has no signature.
+ * `signed`: it holds, every byte of the file but its own chunk as the key
+ * signed them; `key` is the public key, base64. `broken`: one that doesn't
+ * hold, since the file was changed after it was signed, or that doesn't read;
+ * `reason` is for people, as {@link inspectAppFile}'s is.
+ */
+export type SignatureCheck =
+  | { status: 'unsigned' }
+  | { status: 'signed'; key: string }
+  | { status: 'broken'; key: string | null; reason: string }
+
+/** Base64, from bytes. */
+export function base64Of(bytes: Uint8Array): string {
+  let text = ''
+  for (let i = 0; i < bytes.length; i += 0x8000) text += String.fromCharCode(...bytes.subarray(i, i + 0x8000))
+  return btoa(text)
+}
+
+/** Bytes, from base64 or base64url, padded or not; null for anything else. */
+export function bytesOf(text: unknown): Uint8Array | null {
+  if (typeof text !== 'string') return null
+  const plain = text.replace(/\s+/g, '').replace(/-/g, '+').replace(/_/g, '/')
+  if (!/^[A-Za-z0-9+/]*={0,2}$/.test(plain) || plain.replace(/=+$/, '').length % 4 === 1) return null
+  try {
+    return Uint8Array.from(atob(plain.padEnd(Math.ceil(plain.length / 4) * 4, '=')), (c) => c.charCodeAt(0))
+  } catch {
+    return null
+  }
+}
+
+/**
+ * An Ed25519 public key in the one form keys are compared in: its 32 bytes
+ * as padded base64. Null for anything that isn't one.
+ */
+export function keyOf(text: unknown): string | null {
+  const bytes = bytesOf(text)
+  return bytes?.length === 32 ? base64Of(bytes) : null
+}
+
+/** `parts`, end to end. */
+function join(parts: readonly Uint8Array[]): Uint8Array {
+  const out = new Uint8Array(parts.reduce((n, p) => n + p.length, 0))
+  let at = 0
+  for (const part of parts) {
+    out.set(part, at)
+    at += part.length
+  }
+  return out
+}
+
+/** The file a signature covers: every byte of it but the signature's own chunk. */
+export function signedPart(bytes: Uint8Array, chunk: Pick<PngChunk, 'start' | 'end'>): Uint8Array {
+  return join([bytes.subarray(0, chunk.start), bytes.subarray(chunk.end)])
+}
+
+/**
+ * Check an app file's signature: whether it has one, whose key made it, and
+ * whether it holds. It covers every byte of the file but its own chunk, so a
+ * changed byte of the manifest, the code or the picture breaks it. Two
+ * signatures, a chunk that doesn't read and an algorithm other than Ed25519
+ * are broken too, and so is a signature on a platform that can't check one.
+ */
+export async function checkSignature(bytes: Uint8Array): Promise<SignatureCheck> {
+  const chunks = pngChunks(bytes)
+  if (!chunks) return { status: 'broken', key: null, reason: 'it is not a whole PNG' }
+  const found = chunks.filter((c) => c.type === 'iTXt' && itxtKeyword(c.data) === SIGNATURE_KEYWORD)
+  if (!found.length) return { status: 'unsigned' }
+  if (found.length > 1) return { status: 'broken', key: null, reason: 'it has two signatures' }
+  const chunk = found[0]!
+  let fields: Record<string, unknown>
+  try {
+    fields = JSON.parse(await itxtText(chunk.data))
+  } catch {
+    return { status: 'broken', key: null, reason: 'its signature does not read' }
+  }
+  const key = keyOf(fields?.key)
+  if (fields?.algorithm !== SIGNATURE_ALGORITHM) {
+    return { status: 'broken', key, reason: `its signature is ${JSON.stringify(fields?.algorithm)}, and this SDK checks ${SIGNATURE_ALGORITHM}` }
+  }
+  const signature = bytesOf(fields.signature)
+  if (!key || signature?.length !== 64) return { status: 'broken', key, reason: 'its signature does not read' }
+  let holds: boolean
+  try {
+    const publicKey = await crypto.subtle.importKey('raw', bytesOf(key)!.slice(), { name: SIGNATURE_ALGORITHM }, false, ['verify'])
+    holds = await crypto.subtle.verify({ name: SIGNATURE_ALGORITHM }, publicKey, signature.slice(), signedPart(bytes, chunk).slice())
+  } catch {
+    return { status: 'broken', key, reason: `this platform can’t check an ${SIGNATURE_ALGORITHM} signature` }
+  }
+  return holds ? { status: 'signed', key } : { status: 'broken', key, reason: 'it was changed after it was signed' }
+}
+
+/** A site's trust: the public keys it holds, and what a file none of them signed gets. */
+export interface Trust {
+  /** Ed25519 public keys, base64, as `generateSigningKeys()` gives them. Any number, or none. */
+  keys: readonly string[]
+  /**
+   * What a file none of the keys signed gets, unsigned or signed by another
+   * key: installed, refused, or asked about first. Default `'ask'`.
+   */
+  otherwise?: TrustAnswer
+}
+
+/** What a site's trust says of a file: install it, ask first, or refuse it. */
+export type TrustAnswer = 'install' | 'ask' | 'refuse'
+
+/**
+ * A file's standing with a site: signed by a key the site holds (`trusted`),
+ * by another (`untrusted`), not signed, or a signature that doesn't hold.
+ */
+export type Standing = 'trusted' | 'untrusted' | 'unsigned' | 'broken'
+
+/**
+ * What a site's trust says of a checked file: its standing, the key that
+ * signed it, and the answer. A key the site holds installs it. A broken
+ * signature is refused whatever the trust. Without a trust, any other file
+ * installs; with one, it gets the trust's `otherwise`.
+ */
+export function judgeSignature(
+  check: SignatureCheck,
+  trust: Trust | null
+): { standing: Standing; key: string | null; answer: TrustAnswer } {
+  if (check.status === 'broken') return { standing: 'broken', key: check.key, answer: 'refuse' }
+  const key = check.status === 'signed' ? check.key : null
+  if (key != null && trust?.keys.some((k) => keyOf(k) === key)) return { standing: 'trusted', key, answer: 'install' }
+  const standing = key != null ? 'untrusted' : 'unsigned'
+  if (!trust) return { standing, key, answer: 'install' }
+  const otherwise = trust.otherwise === 'install' || trust.otherwise === 'refuse' ? trust.otherwise : 'ask'
+  return { standing, key, answer: otherwise }
+}
+
+/* ── The code's imports ─────────────────────────────────────────────────── */
+
+/** One module an app file's code imports at its head: its name, and where its quoted name sits in the code. */
+export interface CodeImport {
+  specifier: string
+  /** The quoted name's first quote, and the index after its last. */
+  start: number
+  end: number
+}
+
+const IDENTIFIER_START = /[A-Za-z_$\u0080-\uffff]/
+const IDENTIFIER_PART = /[\w$\u0080-\uffff]/
+
+/**
+ * The modules an app file's code imports and re-exports in the declarations
+ * it opens with, in order: `import … from "…"`, `import "…"`,
+ * `export * from "…"` and `export { … } from "…"`. A bundler writes every
+ * static import there, so these are the names a desktop points at the page's
+ * own modules. The head ends at the first other statement, and an `import()`
+ * in the code past it is never listed. Null when a declaration doesn't read.
+ */
+export function leadingImports(code: string): CodeImport[] | null {
+  const n = code.length
+  /** Past white space and comments from `i`; -1 at a comment left open. */
+  const skip = (i: number): number => {
+    for (;;) {
+      while (i < n && /\s/.test(code[i]!)) i++
+      if (code.startsWith('//', i)) {
+        while (i < n && !/[\n\r\u2028\u2029]/.test(code[i]!)) i++
+      } else if (code.startsWith('/*', i)) {
+        const close = code.indexOf('*/', i + 2)
+        if (close < 0) return -1
+        i = close + 2
+      } else {
+        return i
+      }
+    }
+  }
+  /** The word at `i`, or ''. */
+  const word = (i: number): string => {
+    if (!IDENTIFIER_START.test(code[i] ?? '')) return ''
+    let j = i + 1
+    while (j < n && IDENTIFIER_PART.test(code[j]!)) j++
+    return code.slice(i, j)
+  }
+  /** The string literal at `i`: its value and the index past it; null when it doesn't read. */
+  const string = (i: number): { value: string; end: number } | null => {
+    const quote = code[i]
+    let value = ''
+    for (let j = i + 1; j < n; j++) {
+      const c = code[j]!
+      if (c === quote) return { value, end: j + 1 }
+      if (/[\n\r]/.test(c)) return null
+      if (c === '\\') {
+        const next = code[++j]
+        if (next == null || !/['"\\/]/.test(next)) return null
+        value += next
+      } else {
+        value += c
+      }
+    }
+    return null
+  }
+  /** Past a braced list from `i` (its `{`), names quoted or not; -1 when it doesn't read. */
+  const braces = (i: number): number => {
+    for (let j = i + 1; ; ) {
+      j = skip(j)
+      if (j < 0 || j >= n) return -1
+      const c = code[j]!
+      if (c === '}') return j + 1
+      if (c === "'" || c === '"') {
+        const s = string(j)
+        if (!s) return -1
+        j = s.end
+      } else if (c === ',' || c === '*' || c === ':') {
+        j++
+      } else {
+        const w = word(j)
+        if (!w) return -1
+        j += w.length
+      }
+    }
+  }
+
+  const out: CodeImport[] = []
+  let i = code.startsWith('#!') ? code.search(/[\n\r]|$/) : 0
+  for (;;) {
+    i = skip(i)
+    if (i < 0) return null
+    const keyword = word(i)
+    if (keyword !== 'import' && keyword !== 'export') {
+      // A directive ("use strict") before the declarations is passed over.
+      if ((code[i] === '"' || code[i] === "'") && !out.length) {
+        const s = string(i)
+        const after = s ? skip(s.end) : -1
+        if (after >= 0 && code[after] === ';') {
+          i = after + 1
+          continue
+        }
+      }
+      return out
+    }
+    let j = skip(i + keyword.length)
+    if (j < 0) return null
+    // import() and import.meta are code; so is any export but a re-export.
+    if (keyword === 'import' && (code[j] === '(' || code[j] === '.')) return out
+    if (keyword === 'export' && code[j] !== '*' && code[j] !== '{') return out
+    // To the module's name: the first string outside braces that no `as` names.
+    let found: { value: string; start: number; end: number } | null = null
+    let named = false
+    while (!found) {
+      j = skip(j)
+      if (j < 0 || j >= n) return null
+      const c = code[j]!
+      if (c === "'" || c === '"') {
+        const s = string(j)
+        if (!s) return null
+        if (!named) found = { value: s.value, start: j, end: s.end }
+        named = false
+        j = s.end
+      } else if (c === '{') {
+        j = braces(j)
+        if (j < 0) return null
+        // `export { … }` with no `from` is the module's own export: code.
+        if (keyword === 'export' && word(skip(j)) !== 'from') return out
+      } else if (c === '*' || c === ',') {
+        j++
+      } else {
+        const w = word(j)
+        if (!w) return null
+        named = w === 'as'
+        j += w.length
+      }
+    }
+    out.push({ specifier: found.value, start: found.start, end: found.end })
+    j = skip(found.end)
+    if (j < 0) return null
+    // Import attributes: with { type: "json" }.
+    const attributes = word(j)
+    if (attributes === 'with' || attributes === 'assert') {
+      j = skip(j + attributes.length)
+      if (j < 0 || code[j] !== '{') return null
+      j = braces(j)
+      if (j < 0) return null
+      j = skip(j)
+      if (j < 0) return null
+    }
+    i = code[j] === ';' ? j + 1 : j
+  }
 }
 
 interface Semver {

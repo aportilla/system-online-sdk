@@ -5,7 +5,9 @@
  *
  * - A window entry with a depth (`z`) was open at the write. One without is a
  *   box alone — a palette, or a window closed this session — which a reload
- *   never reopens and an open() still lands in.
+ *   never reopens and an open() still lands in. A window of an application
+ *   that isn't running, one the boot skipped say, keeps its depth through a
+ *   write, so it reopens once the application loads.
  * - Writes wait a moment and are held until the boot has reopened the
  *   session: a write while windows are still reopening would drop the depth
  *   of the ones not reached yet. Hiding or leaving the page writes at once.
@@ -86,20 +88,25 @@ export interface SessionSnapshot {
   windows: Record<string, SavedWindow>
   active: string | null
   pattern: string | null
+  /** The applications not running whose windows wait for them to load: a known window of one keeps its depth. */
+  waiting?: readonly string[]
 }
 
 /**
  * The session to write: every window known before keeps its box and loses
- * its depth, and the snapshot's windows — the open ones with theirs — go
- * over them.
+ * its depth, but for one of an application the snapshot says is waiting, and
+ * the snapshot's windows — the open ones with theirs — go over them.
  */
 export function mergeSession(
   known: Record<string, SavedWindow>,
   snapshot: SessionSnapshot,
   extra: Record<string, unknown>
 ): SavedSession {
+  const waiting = new Set(snapshot.waiting ?? [])
   const windows: Record<string, SavedWindow> = {}
-  for (const [item, w] of Object.entries(known)) windows[item] = { app: w.app, pin: w.pin }
+  for (const [item, w] of Object.entries(known)) {
+    windows[item] = waiting.has(w.app) && w.z != null ? { app: w.app, pin: w.pin, z: w.z } : { app: w.app, pin: w.pin }
+  }
   for (const [item, w] of Object.entries(snapshot.windows)) {
     const entry = windowEntry(w)
     if (entry) windows[item] = entry

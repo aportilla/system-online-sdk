@@ -1,8 +1,8 @@
 # App files
 
-An application on the shell ships as one PNG, its app file. The picture is the application's box, for people to see, in a file browser or in a store. Two `iTXt` chunks carry its manifest and its code. A desktop runs the application from the chunks alone.
+An application on the shell ships as one PNG, its app file. The picture is the application's box, for people to see, in a file browser or in a store. Two `iTXt` chunks carry its manifest and its code, and a third, once it's signed, its signature. A desktop runs the application from the chunks alone: built into a site, or installed while it runs ([SHELL.md § Installing applications](./SHELL.md#installing-applications)).
 
-`system-online-sdk/build` writes app files and builds them into a site, as two Vite plugins. It runs under Node in a build, and no page imports it. Reading an app file is in `system-online-sdk/pure`.
+`system-online-sdk/build` writes app files, signs them, and builds them into a site or serves them to it, as two Vite plugins. It runs under Node in a build, and no page imports it. Reading an app file, and checking its signature, are in `system-online-sdk/pure`.
 
 ## The file
 
@@ -10,6 +10,7 @@ An application on the shell ships as one PNG, its app file. The picture is the a
 | --- | --- | --- |
 | `system-online.app` | no | the manifest, as JSON |
 | `system-online.code` | yes, zlib | the application's code, one ES module |
+| `system-online.signature` | no | once signed, the signature, as JSON (§ Signing) |
 
 ```json
 {
@@ -32,7 +33,8 @@ An application on the shell ships as one PNG, its app file. The picture is the a
 - A reader refuses a manifest whose `version` isn't a version, whose `requires` isn't a version or a caret range, or whose `api` is missing or isn't a whole number from 1, so every manifest it hands on can be put in order and checked against an SDK.
 - `description` is optional: what the application is, in a sentence or two of plain text. The format sets no limit on its length, and the box doesn't show it.
 - `icon` is the 32 × 32 icon, its PNG as a `data:` URL, so a desktop can show the icon without running the code.
-- The code's default export is the application's factory. It imports `vintage-frames`, `system-online-sdk` and `system-online-sdk/pure` by name, and the page's own copies serve them.
+- The code's default export is the application's factory. It imports `vintage-frames`, `system-online-sdk` and `system-online-sdk/pure` by name, in the declarations it opens with, and the page's own copies serve them. A desktop that installs the file calls the factory with no arguments.
+- A reader before signatures skips the signature's chunk, as any reader skips a chunk it doesn't know, so a signed file is format 2 too.
 
 Format 1 is what vintage-frames 0.17 to 0.19 wrote, under the keywords `vintage-frames.app` and `vintage-frames.code`, before the shell moved to this SDK. Its code imports `vintage-frames/shell`, which no longer exists, so this SDK reads no format 1 file and says to build it again here.
 
@@ -65,8 +67,9 @@ export default defineConfig({
 - `requires` is the repo's `system-online-sdk` range from package.json. It must be a caret range, and the SDK in the build must meet it.
 - `api` is the build's SDK's `APP_API`.
 - The entry is built as a library: ES, one module, the three entries left as imports, art and `?raw` markup inlined.
-- The build fails when the bundle breaks a rule, and says which: CSS or any other file emitted beside the code, more than one module, Lit or a copy of vintage-frames or the SDK bundled in, or an import of anything but the three entries.
+- The build fails when the bundle breaks a rule, and says which: CSS or any other file emitted beside the code, more than one module, Lit or a copy of vintage-frames or the SDK bundled in, an import of anything but the three entries, or one a desktop can't point at its own copies when it installs the file: an `import()` of them, or an import past the declarations the module opens with.
 - `vite build --watch` writes the file, and the `copyTo` copy, on every rebuild. `app` is read when the build starts, so restart a watch after changing it.
+- The build doesn't sign. Signing is a step after it (§ Signing).
 
 ## A site's build
 
@@ -86,16 +89,57 @@ import meteors, { manifest } from '../apps/Meteors.png?app'
 createShell(desktop, { apps: [finder({ storage }), meteors()] })
 ```
 
-- The default export is the application's factory. The definition it returns takes the manifest's icon. `manifest` is the manifest.
+- `?app` builds the application in. The default export is the application's factory. The definition it returns takes the manifest's icon, and the manifest as `manifest`, so what's installed lists it with its file's manifest. `manifest` is the manifest.
+- `?app-file` builds nothing in. The default export is the file's URL: the file served as an asset, byte for byte, so its signature holds, for the shell's install. `manifest` is the manifest, read at build. A file whose signature doesn't hold fails the build, as an install would refuse it.
+
+  ```ts
+  import meteors, { manifest } from '../apps/Meteors.png?app-file'
+
+  finder({
+    storage,
+    art,
+    seed: async (catalog, install) => {
+      await install(await (await fetch(meteors)).arrayBuffer())
+    },
+  })
+  ```
 - The build fails on a file that isn't an app file, and on one the site's SDK doesn't run (`appRuns`): one built at an app API outside the SDK's. It names the application and what it needs.
 - The code's imports resolve to the site's own vintage-frames and SDK, so the page keeps one copy of each.
 - A new app file reloads the dev server's page.
 
-For the import's types, add `system-online-sdk/build/client` to tsconfig.json beside `vite/client`:
+For the imports' types, add `system-online-sdk/build/client` to tsconfig.json beside `vite/client`:
 
 ```json
 { "compilerOptions": { "types": ["vite/client", "system-online-sdk/build/client"] } }
 ```
+
+## Signing
+
+A signature says who made a file, so a site can take code that runs with the page's whole reach from the people it trusts ([SHELL.md § Trust](./SHELL.md#trust)). It is Ed25519, through WebCrypto, so neither a browser nor Node needs a dependency to sign or check one.
+
+- **It covers every byte of the file but its own chunk.** A changed byte of the manifest, the code or the box breaks it, so the box a store shows is the author's too.
+- **The chunk** is `system-online.signature`, before IEND, uncompressed: `{ "algorithm": "Ed25519", "key": "…", "signature": "…" }`, the public key's 32 bytes and the signature's 64, each base64. It carries its key, so a desktop tells a file signed by a key it doesn't hold from one changed since it was signed.
+- **Signing is a step after the build**, with a key that never leaves the machine that signs. `generateSigningKeys()` makes a pair: the public key, base64, which a site lists in its trust, and the private key, its PKCS #8 bytes as base64. `signAppFile(file, privateKey)` takes the private key that way or as PEM, replaces a signature already there, and refuses a file that isn't an app file.
+- **`writeAppFile` drops a signature** with the app chunks, so a rewritten file never carries one that doesn't match it. Sign last.
+- **Checking is pure**, in `system-online-sdk/pure`, so an index's CI and a store run it alike. `checkSignature(file)` resolves `{ status: 'unsigned' }`, `{ status: 'signed', key }`, or `{ status: 'broken', key, reason }` for a signature that doesn't hold: the file changed, two signatures, a chunk that doesn't read, another algorithm, or a platform that can't check one. `judgeSignature(check, trust)` is what a site's trust says of it: the standing, `trusted`, `untrusted`, `unsigned` or `broken`, and the answer, `install`, `ask` or `refuse`.
+
+```sh
+# Once: a key pair. Keep the private key out of every repo.
+node --input-type=module -e "import { generateSigningKeys } from 'system-online-sdk/build'; console.log(await generateSigningKeys())"
+```
+
+```ts
+// A publish step: sign, then file the signed copy.
+import { readFile, writeFile } from 'node:fs/promises'
+import { signAppFile } from 'system-online-sdk/build'
+import { checkSignature } from 'system-online-sdk/pure'
+
+const signed = await signAppFile(new Uint8Array(await readFile('dist/Meteors.png')), process.env.SIGNING_KEY!)
+console.log(await checkSignature(signed)) // { status: 'signed', key: '…' }
+await writeFile('apps/meteors/0.3.1/Meteors.png', signed)
+```
+
+An index's CI checks every file with `checkSignature` and never signs.
 
 ## The app API
 
@@ -130,11 +174,11 @@ The box is the SDK's frame with the application's artwork and text set into it. 
 
 ## The rules an application keeps
 
-- **Imports**: `vintage-frames`, `system-online-sdk`, `system-online-sdk/pure` and its own files. No Lit of its own.
+- **Imports**: `vintage-frames`, `system-online-sdk`, `system-online-sdk/pure` and its own files, statically: a desktop that installs the file points the imports its module opens with at its own copies, and no others. No Lit of its own.
 - **Art** is imported, so the build inlines it. No page paths.
 - **Layout** is set on its own elements. No CSS import.
 - **Session keys** start with its id, read back defensively, and nothing breaks when `ctx.state` is null.
-- **Nothing site-specific** through the context: no `ctx.services`, no `ctx.apps`.
+- **Nothing site-specific** through the context: no `ctx.services`, no `ctx.apps`. The site's index is `ctx.index`, and a desktop that installs the file hands its factory nothing.
 - **Fonts are the system's**: it sets type in the families the site serves, reached through `ctx.fonts`, and carries no strikes. One that opens font suitcases says `opens: ['font']`, since the kind is the shell's ([SHELL.md § Fonts](./SHELL.md#fonts)).
 - **Its kinds** are named after its id, and **its id never changes**: saved icons, windows and sessions name it.
 
@@ -146,12 +190,16 @@ The build checks the first three.
 | --- | --- |
 | `packApp({ manifest, icon, code, artwork })` | The whole app file. `manifest` has no `format`, `api` or `icon`; they are filled in. |
 | `composeBox({ manifest, icon, artwork })` | The box alone, as a PNG. |
-| `writeAppFile(box, manifest, code)` | `box` with the manifest and code in its chunks. App chunks already there are replaced, and the picture is copied as it is. |
+| `writeAppFile(box, manifest, code)` | `box` with the manifest and code in its chunks. App chunks already there are replaced, a signature is dropped, and the picture is copied as it is. |
+| `signAppFile(file, privateKey)` | The file signed (§ Signing). |
+| `generateSigningKeys()` | A new Ed25519 key pair, `{ publicKey, privateKey }`, each base64. |
 
 | `system-online-sdk/pure` | |
 | --- | --- |
 | `readAppFile(bytes)` | The manifest and code, or `null` for any other PNG: a broken signature or CRC, a chunk missing or doubled, a format this SDK doesn't read, a field missing or unreadable. |
-| `inspectAppFile(bytes)` | The manifest and code, or why the bytes aren't an app file, as the end of a sentence: "Meteors.png is not an app file: its code is missing". The wording is for people and can change in any release. |
+| `inspectAppFile(bytes)` | The manifest and code, or why the bytes aren't an app file, as the end of a sentence: "Meteors.png is not an app file: its code is missing". The wording is for people and can change in any release. A signed file reads as any other. |
+| `checkSignature(bytes)` | Whether the file is signed, by which key, and whether the signature holds (§ Signing). |
+| `judgeSignature(check, trust)` | What a site's trust says of a checked file: its standing and the answer. |
 | `satisfies(version, range)` | Whether a version meets an exact version or a caret range. |
 | `compareVersions(a, b)` | Below zero, zero or above as `a` comes before, with or after `b`, in semver's order, so `versions.sort(compareVersions)` puts them oldest first. Anything that isn't a version comes first, so a sort never throws. |
 | `appRuns(manifest)` | Whether this SDK runs the application: its `api` from `APP_API_OLDEST` to `APP_API`. |

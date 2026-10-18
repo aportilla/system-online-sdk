@@ -160,7 +160,9 @@ const shell = createShell(document.querySelector('vf-desktop')!, {
 
 ### 6. Applications from app files
 
-An application built in its own repo ([An application in its own repo](#an-application-in-its-own-repo)) ships as an app file, one PNG. A site builds it in:
+An application built in its own repo ([An application in its own repo](#an-application-in-its-own-repo)) ships as an app file, one PNG. A site builds it in, or installs it while the desktop runs.
+
+Built in, it's one of `apps`:
 
 ```ts
 // vite.config.ts
@@ -174,9 +176,37 @@ import meteors from '../apps/Meteors.png?app'
 createShell(desktop, { apps: [finder({ storage, art }), meteors()] })
 ```
 
-- Add `system-online-sdk/build/client` to tsconfig's `types` for the import's types.
+Installed, it's a file the desktop keeps, and a new version is a new file, with no deploy of the site's code:
+
+```ts
+// main.ts
+import meteors from '../apps/Meteors.png?app-file'
+
+const SITE_KEY = '…' // the public key the site's files are signed with (APP-FILES.md § Signing)
+
+createShell(desktop, {
+  apps: [
+    finder({
+      storage,
+      art,
+      // A new desktop installs its defaults: files from the first.
+      seed: async (catalog, install) => {
+        await install(await (await fetch(meteors)).arrayBuffer())
+      },
+    }),
+  ],
+  trust: { keys: [SITE_KEY], otherwise: 'ask' },
+})
+```
+
+- Add `system-online-sdk/build/client` to tsconfig's `types` for the imports' types.
 - The site's build fails on an app file its SDK doesn't run, and names it.
 - Changes to the application are made in its repo, and the new file is copied into the site.
+- An app file a visitor drops on the desktop installs too. With `trust`, a file the site's keys didn't sign is asked about first, in the Finder's `untrusted-application` alert, which the site answers with its own through `alertWith` ([SHELL.md § Trust](./SHELL.md#trust)). Without it, any app file installs.
+- The site answers the Finder's other new alerts the same way: `replace-application`, `application-unavailable` and `install-refused` ([SHELL.md § The Finder's alerts](./SHELL.md#the-finders-alerts)).
+- An application built in keeps no file, carries no signature and is never uninstalled. One installed keeps its file with the catalog, wherever the Finder's storage keeps items, so under `memoryStorage()` an install lasts the page.
+- A site with a Content-Security-Policy allows `blob:` in `script-src`, where installed code loads from ([SHELL.md § Loading the code](./SHELL.md#loading-the-code)).
+- A site that hands its applications an index of app files to install from, a store's, sets `index` on `createShell` from a build constant ([SHELL.md § The index](./SHELL.md#the-index)).
 
 ## Writing an application
 
@@ -367,7 +397,8 @@ fonts: DEV_FONTS,
   It prints the manifest, or why the file isn't an app file.
 - Give each release a new `version` in `src/app.ts`. An index puts an application's builds in order by it.
 - The release is the file. Copy it into each site's `apps/`, or set `copyTo` to write it there on every build. Nothing goes to npm.
-- A site runs the file when its SDK runs the file's `api`. When it doesn't, the site's build refuses the file and names the SDK to build it on.
+- A site runs the file when its SDK runs the file's `api`. When it doesn't, the site's build refuses the file and names the SDK to build it on, and a desktop that installed it skips it at the boot, saying why.
+- A file published to an index is signed there, after the build, with `signAppFile` and a key that never leaves the machine that signs ([APP-FILES.md § Signing](./APP-FILES.md#signing)). A site that holds the key installs it without asking.
 
 ## A tool that reads app files
 
@@ -392,6 +423,7 @@ const order = ['0.10.0', '0.2.0'].sort(compareVersions) // ['0.2.0', '0.10.0']
 ```
 
 - `inspectAppFile()` says why bytes aren't an app file, as the end of a sentence for people. `readAppFile()` gives `null` instead.
+- `checkSignature()` says whether a file is signed, by which key, and whether the signature holds; `judgeSignature()` what a site's trust says of it. An index's CI checks every file this way and never signs; signing is `system-online-sdk/build`'s `signAppFile()` ([APP-FILES.md § Signing](./APP-FILES.md#signing)).
 - Whether a site runs a build turns on its `api` alone: a site runs `APP_API_OLDEST` to `APP_API` of its own SDK, and `appRuns()` checks a manifest against the SDK installed beside the tool. `requires` names the SDK range the build was made with.
 - A test makes its app files with `system-online-sdk/build`: `packApp({ manifest, icon, code })` writes a whole file, and `writeAppFile(box, manifest, code)` writes the chunks onto any PNG. Both throw on a manifest the reader would refuse, so neither writes a broken one. That entry imports Vite's types alone, so a tool needs no Vite.
 - [APP-FILES.md § Pieces on their own](./APP-FILES.md#pieces-on-their-own) lists every function.

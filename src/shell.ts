@@ -15,14 +15,21 @@
  * - Each application's `init(ctx)` gets the desktop, the window manager, its
  *   own menus, dialogs and window markup, the other applications' actions
  *   (read at the call), the catalog when a Finder runs, the system's fonts,
- *   the site's services, `ask()`, `gate()`, `onFront()` and `onDispose()`.
- *   Everything it sets up comes down through `onDispose()`, and its dialogs
- *   with it, so a hot reload starts clean. The shell composes no UI of its
- *   own.
+ *   the site's services and index, `ask()`, `gate()`, `onFront()`,
+ *   `onDispose()`, and the installs: `install()`, `uninstall()` and what's
+ *   installed. Everything it sets up comes down through `onDispose()`, and
+ *   its dialogs with it, so a hot reload starts clean. The shell composes no
+ *   UI of its own.
+ * - Applications come from `apps`, built in, and from app files installed at
+ *   runtime (installs.ts), which register as the built-in ones do and come
+ *   down when they're uninstalled. Two applications with one id, or one kind
+ *   two applications register, are refused. An `init` that throws, or a
+ *   reopen that rejects, takes that application down alone.
  * - The shell registers three kinds itself, which no application's `kinds`
- *   replaces: `app`, an application's icon, which opens the application;
- *   `alias`, which opens its original; and `font`, a suitcase, which opens
- *   in the first application that says it opens suitcases (`opens`).
+ *   replaces: `app`, an application's icon, which opens the application and
+ *   claims app files; `alias`, which opens its original; and `font`, a
+ *   suitcase, which opens in the first application that says it opens
+ *   suitcases (`opens`).
  * - The system's fonts are the families the site serves. A suitcase
  *   directly in the System Folder's Fonts installs its family. `ctx.fonts`
  *   gives every application the installed families, any family by name and
@@ -31,9 +38,10 @@
  * - A window showing a catalog item follows it: its title follows a rename,
  *   and it closes when the item is removed.
  * - The boot waits for the desktop and its menu bar to render, reads the
- *   catalog, seeds it once, reopens the last session's windows deepest
- *   first and the active one last, opens what Startup Items holds, then
- *   starts saving.
+ *   catalog, seeds it once, loads the installed applications, reopens the
+ *   last session's windows deepest first and the active one last, opens
+ *   what Startup Items holds, then starts saving. A window of an application
+ *   that didn't load stays in the session, and reopens once it loads.
  */
 
 import { onScaleChange, VfWindow } from 'vintage-frames'
@@ -47,6 +55,8 @@ import type {
   VfModalDialog,
   VfViewportBox,
 } from 'vintage-frames'
+import { keyOf } from './app-file.js'
+import type { AppManifest, Trust } from './app-file.js'
 import {
   ALIAS_KIND,
   APP_KIND,
@@ -59,8 +69,12 @@ import {
   startupItemsOf,
 } from './catalog.js'
 import type { AppleMenuEntry, Catalog, CatalogStorage, Item, SystemFolders, Volumes } from './catalog.js'
+import type { FinderAlert, FinderAlerts } from './finder.js'
 import { installedFamiliesOf } from './fonts.js'
 import type { FontFamily } from './fonts.js'
+import type { Point } from './geometry.js'
+import { createInstalls } from './installs.js'
+import type { Install, InstallOptions, InstallResult, InstalledApp, UninstallResult } from './installs.js'
 import { loadStrike } from './strikes.js'
 import { createWindowManager, deepActiveElement, desktopRendered } from './windows.js'
 import type { WindowManager } from './windows.js'
@@ -82,8 +96,12 @@ export interface KindDefinition {
   copy?(from: Item, to: Item): void | Promise<void>
   /** Empty Trash removed the item: drop its payload. */
   onRemove?(item: Item): void | Promise<void>
-  /** Make an item of a pasted or dropped file in `parent`; resolves whether it did. */
-  claim?(file: Blob, parent: string | null): Promise<boolean>
+  /**
+   * Make an item of a pasted or dropped file in `parent`; resolves whether it
+   * did. `at` is where a dropped file was let go, the item's place in
+   * `parent`, whole system px; a paste gives none, for the next free cell.
+   */
+  claim?(file: Blob, parent: string | null, at?: Point | null): Promise<boolean>
   /** The item on the system clipboard, as a file. */
   export?(item: Item): Promise<Blob | null>
 }
@@ -94,8 +112,8 @@ export interface CatalogSetup {
   volumes?: Volumes
   /** The System Folder, named; its folders drive the Apple menu, what opens at startup and the fonts installed. */
   system?: SystemFolders
-  /** Run once per storage, to store the site's defaults. */
-  seed?: (catalog: Catalog) => void | Promise<void>
+  /** Run once per storage, to store the site's defaults: the catalog, and the install door for the applications a new desktop comes with. */
+  seed?: (catalog: Catalog, install: Install) => void | Promise<void>
 }
 
 /** One application. */
@@ -105,6 +123,8 @@ export interface AppDefinition<Actions = unknown> {
   name: string
   /** Its 32×32 art, for the Finder's icon of it. */
   icon?: string
+  /** The app file it came from's manifest: `?app` and an install set it. */
+  manifest?: AppManifest
   /** A fragment of `vf-menu` elements, each with a `data-menu` name. */
   menus?: string
   /**
@@ -147,12 +167,16 @@ export interface AppContext {
   readonly catalog: Catalog | null
   /** The site's own services. */
   readonly services: Record<string, any>
+  /** The URL of the site's index of app files, or null when it gives none. */
+  readonly index: string | null
   /** The saved session, or null. */
   readonly state: ShellState | null
   /** The system's fonts: the families the site serves, and which are installed. */
   readonly fonts: SystemFonts
   /** Every kind the applications register, the shell's `app`, `alias` and `font` first, in registration order. */
   readonly kinds: ReadonlyMap<string, KindDefinition>
+  /** Settles once the boot is done: every application loaded or skipped, the session reopened. */
+  readonly ready: Promise<void>
   /** A kind's definition, or undefined. */
   kind(kind: string): KindDefinition | undefined
   /** The application definition with `id`. */
@@ -163,6 +187,21 @@ export interface AppContext {
    * other kind, which opens itself.
    */
   opener(kind: string): AppDefinition | undefined
+  /**
+   * Install an app file, through the site's trust: its icon in `parent`, at
+   * `at` or the next free cell, and the application loaded. Resolves what
+   * happened: installed, updated, present (say `replace` to go ahead), or
+   * refused and why.
+   */
+  install(file: Blob | ArrayBuffer | Uint8Array, options?: InstallOptions): Promise<InstallResult>
+  /** Uninstall an installed application: every icon of it, wherever it is, and its file. It asks nothing. */
+  uninstall(id: string): Promise<UninstallResult>
+  /** Every application on the desktop, built in or installed, loaded or not. */
+  installed(): InstalledApp[]
+  /** Follow what's installed: `fn` gets it each time any of it changes. Torn down with the application. */
+  onInstalled(fn: (apps: InstalledApp[]) => void): void
+  /** An installed application's file, by id, named for it; null for one built in or not installed. */
+  appFile(id: string): Promise<File | null>
   /** One of its menus by `data-menu`; throws when the markup drifts. */
   menu(name: string): VfMenu
   /** One of its menu items by `value`; throws when the markup drifts. */
@@ -197,7 +236,7 @@ export interface AppContext {
   onFront(fn: (front: boolean) => void): void
   /** A listener torn down with the application. */
   on(target: EventTarget, type: string, fn: (e: Event) => void, options?: boolean | AddEventListenerOptions): void
-  /** Run `fn` when the shell is disposed. */
+  /** Run `fn` when the shell is disposed, or the application is uninstalled. */
   onDispose(fn: () => void): void
 }
 
@@ -229,7 +268,7 @@ export function defineApp<Actions>(definition: AppDefinition<Actions>): AppDefin
 }
 
 export interface ShellOptions {
-  /** The applications; the first with a `catalog` is the Finder. */
+  /** The applications built in; the first with a `catalog` is the Finder. */
   apps: AppDefinition<any>[]
   /** The application front while no window is active. Default the Finder, else the first. */
   defaultApp?: string
@@ -245,6 +284,10 @@ export interface ShellOptions {
   clock?: boolean
   /** Open what Startup Items holds once the session is back. Default true; false skips it for this boot. */
   startup?: boolean
+  /** The public keys the site trusts, and what a file none of them signed gets. Unset, any app file installs. */
+  trust?: Trust | null
+  /** The URL of the site's index of app files, handed to every application as `ctx.index`. */
+  index?: string | null
 }
 
 /** A running shell. */
@@ -253,8 +296,18 @@ export interface Shell {
   readonly windows: WindowManager
   readonly catalog: Catalog | null
   readonly apps: Record<string, any>
-  /** Settles once the boot has read the catalog and reopened the session. */
+  /** Settles once the boot has read the catalog, loaded the installed applications and reopened the session. */
   readonly ready: Promise<void>
+  /** Install an app file, as `ctx.install` does. */
+  install(file: Blob | ArrayBuffer | Uint8Array, options?: InstallOptions): Promise<InstallResult>
+  /** Uninstall an installed application, as `ctx.uninstall` does. */
+  uninstall(id: string): Promise<UninstallResult>
+  /** Every application on the desktop, built in or installed, loaded or not. */
+  installed(): InstalledApp[]
+  /** Follow what's installed. Returns the unsubscribe. */
+  onInstalled(fn: (apps: InstalledApp[]) => void): () => void
+  /** An installed application's file, by id, named for it, or null. */
+  appFile(id: string): Promise<File | null>
   dispose(): void
 }
 
@@ -262,13 +315,49 @@ export interface Shell {
 const isTextField = (el: Element | null): boolean =>
   el instanceof HTMLInputElement || el instanceof HTMLTextAreaElement || (el as HTMLElement | null)?.isContentEditable === true
 
+/** What an error says. */
+const said = (err: unknown) => (err instanceof Error ? err.message : String(err))
+
+/** One application the shell runs: its definition, its parsed markup, the kinds it set and its setup's teardown. */
+interface Running {
+  def: AppDefinition
+  menus: VfMenu[]
+  dialogs: HTMLElement[]
+  windows: DocumentFragment
+  /** The kinds it registered, to take back when it comes down. */
+  kinds: string[]
+  /** Its setup, undone in reverse. */
+  own: (() => void)[]
+  /** Whether its `init` has returned. */
+  started: boolean
+}
+
+/** Check a site's trust, which a typo would otherwise leave open. */
+function checkTrust(trust: Trust): void {
+  if (!Array.isArray(trust.keys)) throw new Error('system-online-sdk: trust.keys is not a list of public keys')
+  trust.keys.forEach((key, i) => {
+    if (!keyOf(key)) throw new Error(`system-online-sdk: trust.keys[${i}] is not an Ed25519 public key`)
+  })
+  if (trust.otherwise != null && !['install', 'ask', 'refuse'].includes(trust.otherwise)) {
+    throw new Error(`system-online-sdk: trust.otherwise is ${JSON.stringify(trust.otherwise)}, and it is 'install', 'ask' or 'refuse'`)
+  }
+}
+
 /** Start the shell over `desktop`. The page has imported `vintage-frames` first. */
 export function createShell(desktop: VfDesktop, options: ShellOptions): Shell {
   const definitions = options.apps
+  const ids = new Set<string>()
+  for (const def of definitions) {
+    if (ids.has(def.id)) throw new Error(`system-online-sdk: two applications have the id ${def.id}`)
+    ids.add(def.id)
+  }
   const finderDef = definitions.find((d) => d.catalog)
   const defaultApp = options.defaultApp ?? finderDef?.id ?? definitions[0]?.id ?? ''
   const state = options.state ?? null
   const services = options.services ?? {}
+  const trust = options.trust ?? null
+  if (trust) checkTrust(trust)
+  const index = typeof options.index === 'string' && options.index ? options.index : null
   const teardown: (() => void)[] = []
 
   const bar = desktop.querySelector<VfMenuBar>(':scope > vf-menu-bar')
@@ -276,6 +365,16 @@ export function createShell(desktop: VfDesktop, options: ShellOptions): Shell {
   const systemMenu = bar.querySelector<VfMenu>(':scope > vf-menu')
   if (!systemMenu) throw new Error('system-online-sdk: the menu bar has no system menu')
   bar.shortcuts = true
+
+  // The boot's promises, made first, so every context hands them on.
+  let settle!: () => void
+  let fail!: (err: unknown) => void
+  const ready = new Promise<void>((done, failed) => {
+    settle = done
+    fail = failed
+  })
+  let markRead!: () => void
+  const read = new Promise<void>((done) => (markRead = done))
 
   // The desktop's pattern, as the last session left it, before the first paint.
   const savedPattern = state?.saved?.pattern
@@ -308,25 +407,44 @@ export function createShell(desktop: VfDesktop, options: ShellOptions): Shell {
   desktop.addEventListener('pointerdown', onDesktopPress)
   teardown.push(() => desktop.removeEventListener('pointerdown', onDesktopPress))
 
+  // The applications the shell runs, built in and installed, in registration
+  // order; one leaves when it comes down. A built-in that didn't load says why.
+  const apps = new Map<string, Running>()
+  const failures = new Map<string, string>()
+  const builtIn = (id: string | null | undefined) => definitions.some((d) => d.id === id)
+
+  /** One of the Finder's alerts, its site's answer where it gave one; null with no Finder to raise it. */
+  const finderAlert = <K extends FinderAlert>(id: K, details: FinderAlerts[K]): Promise<string | null> | null => {
+    const finder = finderDef ? actions[finderDef.id] : undefined
+    return typeof finder?.alert === 'function' ? finder.alert(id, details) : null
+  }
+
   // Kinds: the shell's own three, then every application's. An
-  // application's icon opens the application. An alias opens its original
-  // as a double-click would, through the Finder, which says so when it's
-  // gone. A suitcase opens in the first application that says it opens
-  // suitcases, and weighs its family's strikes; the Finder draws it, and
-  // says so when nothing opens it. An application's kind under one of the
-  // shell's names is left out, and the console names the application.
+  // application's icon opens the application, and claims an app file
+  // dropped or pasted. An alias opens its original as a double-click would,
+  // through the Finder, which says so when it's gone. A suitcase opens in
+  // the first application that says it opens suitcases, and weighs its
+  // family's strikes; the Finder draws it, and says so when nothing opens it.
+  // An application's kind under one of the shell's names is left out, and
+  // the console names the application.
   const actions: Record<string, any> = {}
   const openAsDoubleClick = (item: string, from: VfViewportBox | null = null) =>
     actions[finderDef?.id ?? '']?.open?.({ item, from })
   const opener = (kind: string): AppDefinition | undefined =>
-    kind === FONT_KIND ? definitions.find((d) => d.opens?.includes(kind)) : undefined
+    kind === FONT_KIND ? [...apps.values()].find((a) => a.def.opens?.includes(kind))?.def : undefined
   const families = options.fonts ?? []
   const familyNamed = (name: string | null): FontFamily | null => families.find((f) => f.name === name) ?? null
   const kinds = new Map<string, KindDefinition>()
   kinds.set(APP_KIND, {
-    art: (item) => definitions.find((d) => d.id === appIdOf(item))?.icon ?? '',
-    open: (item, from) => void actions[appIdOf(item) ?? '']?.open?.({ from }),
+    art: (item) => {
+      const id = appIdOf(item)
+      return (apps.get(id ?? '')?.def ?? definitions.find((d) => d.id === id))?.icon ?? installs.art(id) ?? ''
+    },
+    open: (item, from) => openApplication(item, from),
     editable: false,
+    size: (item) => installs.size(item),
+    claim: (file, parent, at) => installs.claim(file, parent, at),
+    export: async (item) => installs.exported(item),
   })
   kinds.set(ALIAS_KIND, {
     art: (item) => {
@@ -343,15 +461,45 @@ export function createShell(desktop: VfDesktop, options: ShellOptions): Shell {
     size: (item) => familyNamed(fontFamilyOf(item))?.strikes.reduce((sum, s) => sum + s.bytes, 0) ?? 0,
   })
   const shellKinds = new Set(kinds.keys())
+  const owners = new Map<string, string>()
   for (const def of definitions) {
-    for (const [kind, k] of Object.entries(def.kinds ?? {})) {
-      if (!shellKinds.has(kind)) {
-        kinds.set(kind, k)
-        continue
-      }
-      const hint = kind === FONT_KIND ? `; one that opens suitcases says so: opens: ['${FONT_KIND}']` : ''
-      console.warn(`system-online-sdk (${def.id}): the ${kind} kind is the shell's own, so the application's is left out${hint}`)
+    for (const kind of Object.keys(def.kinds ?? {})) {
+      if (shellKinds.has(kind)) continue
+      const other = owners.get(kind)
+      if (other != null) throw new Error(`system-online-sdk: the ${kind} kind is registered by both ${other} and ${def.id}`)
+      owners.set(kind, def.id)
     }
+  }
+
+  /**
+   * Open an application from its icon. One that runs opens through its
+   * `open`; one that didn't load, or isn't on this desktop at all, says why
+   * in the Finder's alert. One still starting opens nothing yet.
+   */
+  function openApplication(item: Item, from: VfViewportBox | null): void {
+    const id = appIdOf(item)
+    const running = apps.get(id ?? '')
+    if (running) {
+      if (running.started) void actions[id!]?.open?.({ from })
+      return
+    }
+    const installed = installs.get(id)
+    const def = definitions.find((d) => d.id === id)
+    let why: FinderAlerts['application-unavailable']['why']
+    let reason: string
+    let manifest: AppManifest | null = null
+    if (installed) {
+      if (!installed.why) return
+      ;({ why, reason, manifest } = { why: installed.why, reason: installed.reason ?? '', manifest: installed.manifest })
+    } else if (def) {
+      const failure = failures.get(def.id)
+      if (!failure) return
+      ;({ why, reason, manifest } = { why: 'code', reason: failure, manifest: def.manifest ?? null })
+    } else {
+      why = 'missing'
+      reason = 'it isn’t installed on this desktop'
+    }
+    void finderAlert('application-unavailable', { item, app: id ?? '', manifest, why, reason })
   }
 
   const catalog = finderDef?.catalog
@@ -359,22 +507,21 @@ export function createShell(desktop: VfDesktop, options: ShellOptions): Shell {
         storage: finderDef.catalog.storage,
         volumes: finderDef.catalog.volumes,
         system: finderDef.catalog.system,
-        listed: (kind) => kinds.has(kind),
         hooks: (kind) => kinds.get(kind),
       })
     : null
 
   // The installed families, followed through the catalog and announced only
   // when they change: the catalog announces every placement too.
-  let installed = installedFamiliesOf(catalog?.get() ?? null, families)
+  let installedFamilies = installedFamiliesOf(catalog?.get() ?? null, families)
   const fontListeners = new Set<(installed: FontFamily[]) => void>()
   if (catalog) {
     teardown.push(
       catalog.subscribe((st) => {
         const next = installedFamiliesOf(st, families)
-        if (next.length === installed.length && next.every((family, i) => family === installed[i])) return
-        installed = next
-        for (const fn of [...fontListeners]) fn(installed.slice())
+        if (next.length === installedFamilies.length && next.every((family, i) => family === installedFamilies[i])) return
+        installedFamilies = next
+        for (const fn of [...fontListeners]) fn(installedFamilies.slice())
       })
     )
   }
@@ -405,6 +552,32 @@ export function createShell(desktop: VfDesktop, options: ShellOptions): Shell {
   )
   if (catalog) teardown.push(catalog.subscribe(syncGates))
 
+  // What's installed, and who follows it.
+  const installedListeners = new Set<(apps: InstalledApp[]) => void>()
+  const installedList = (): InstalledApp[] => [
+    ...definitions.map((def): InstalledApp => {
+      const failure = failures.get(def.id) ?? null
+      return {
+        id: def.id,
+        name: def.name,
+        source: 'built-in',
+        manifest: def.manifest ?? null,
+        standing: null,
+        key: null,
+        loaded: !!apps.get(def.id)?.started,
+        why: failure ? 'code' : null,
+        reason: failure,
+        pending: false,
+        bytes: null,
+      }
+    }),
+    ...installs.list(),
+  ]
+  const announce = () => {
+    const list = installedList()
+    for (const fn of [...installedListeners]) fn(list.slice())
+  }
+
   // Menus and dialogs: each application's parsed once into detached nodes of this document.
   const parse = (html: string | undefined): HTMLElement[] => {
     if (!html) return []
@@ -415,22 +588,53 @@ export function createShell(desktop: VfDesktop, options: ShellOptions): Shell {
     for (const node of nodes) node.remove()
     return nodes
   }
-  const entries = definitions.map((def) => ({
-    def,
-    menus: parse(def.menus).filter((el): el is VfMenu => el.localName === 'vf-menu'),
-    dialogs: parse(def.dialogs).filter((el) => el.dataset.dialog != null),
-    // Windows stay inert in a template, copied on each ask.
-    windows: (() => {
-      const template = document.createElement('template')
-      template.innerHTML = def.windows ?? ''
-      return template.content
-    })(),
-  }))
 
-  // Applications.
-  const disposers: (() => void)[] = []
-  for (const { def, menus, dialogs, windows: windowMarkup } of entries) {
-    const own: (() => void)[] = []
+  // The menu swap: the front application's menus after the system menu, or,
+  // while one of its held dialogs is open, the asking application's.
+  let slotted: Running | null = null
+  function sync(): void {
+    const app = wm.asking ?? wm.front
+    const entry = apps.get(app) ?? apps.get(defaultApp) ?? null
+    if (!entry || entry === slotted) return
+    if (slotted) for (const menu of slotted.menus) menu.remove()
+    systemMenu!.after(...entry.menus)
+    bar!.label = entry.def.name
+    slotted = entry
+    syncGates()
+  }
+
+  /** An application's markup, parsed, and its kinds registered: built-in ones all before any `init`. */
+  function admit(def: AppDefinition): Running {
+    const entry: Running = {
+      def,
+      menus: parse(def.menus).filter((el): el is VfMenu => el.localName === 'vf-menu'),
+      dialogs: parse(def.dialogs).filter((el) => el.dataset.dialog != null),
+      // Windows stay inert in a template, copied on each ask.
+      windows: (() => {
+        const template = document.createElement('template')
+        template.innerHTML = def.windows ?? ''
+        return template.content
+      })(),
+      kinds: [],
+      own: [],
+      started: false,
+    }
+    for (const [kind, k] of Object.entries(def.kinds ?? {})) {
+      if (!shellKinds.has(kind)) {
+        kinds.set(kind, k)
+        entry.kinds.push(kind)
+        continue
+      }
+      const hint = kind === FONT_KIND ? `; one that opens suitcases says so: opens: ['${FONT_KIND}']` : ''
+      console.warn(`system-online-sdk (${def.id}): the ${kind} kind is the shell's own, so the application's is left out${hint}`)
+    }
+    apps.set(def.id, entry)
+    return entry
+  }
+
+  /** Run an admitted application's `init`. One that throws comes down alone: what it threw, or null once it runs. */
+  function begin(entry: Running): { error: unknown } | null {
+    const { def, menus, dialogs, windows: windowMarkup, own } = entry
     const where = `system-online-sdk (${def.id})`
     // Its dialogs, held under it from the start and removed with it last.
     const held = new Set<Element>()
@@ -452,9 +656,11 @@ export function createShell(desktop: VfDesktop, options: ShellOptions): Shell {
       apps: actions,
       catalog,
       services,
+      index,
       state,
+      ready,
       fonts: {
-        installed: () => installed.slice(),
+        installed: () => installedFamilies.slice(),
         family: familyNamed,
         load: (family, size) => loadStrike(familyNamed(family), size),
         onChange(fn) {
@@ -464,8 +670,16 @@ export function createShell(desktop: VfDesktop, options: ShellOptions): Shell {
       },
       kinds,
       kind: (kind) => kinds.get(kind),
-      app: (id) => definitions.find((d) => d.id === id),
+      app: (id) => apps.get(id)?.def ?? definitions.find((d) => d.id === id),
       opener,
+      install: (file, opts) => installs.install(file, opts),
+      uninstall: (id) => installs.uninstall(id),
+      installed: installedList,
+      onInstalled(fn) {
+        installedListeners.add(fn)
+        own.push(() => installedListeners.delete(fn))
+      },
+      appFile: async (id) => installs.file(id),
       menu(name) {
         const menu = menus.find((m) => m.dataset.menu === name)
         if (!menu) throw new Error(`${where}: missing menu ${name}`)
@@ -544,26 +758,98 @@ export function createShell(desktop: VfDesktop, options: ShellOptions): Shell {
         own.push(fn)
       },
     }
-    const result = def.init(ctx)
-    if (result) actions[def.id] = result
-    disposers.push(() => {
-      for (const fn of own.splice(0).reverse()) fn()
-    })
+    try {
+      const result = def.init(ctx)
+      if (result) actions[def.id] = result
+      entry.started = true
+      return null
+    } catch (error) {
+      console.error(`${where}: its init threw, so it doesn't run —`, error)
+      stop(def.id)
+      return { error }
+    }
   }
 
-  // The menu swap: the front application's menus after the system menu, or,
-  // while one of its held dialogs is open, the asking application's.
-  let slotted: (typeof entries)[number] | null = null
-  const sync = () => {
-    const app = wm.asking ?? wm.front
-    const entry = entries.find((e) => e.def.id === app) ?? entries.find((e) => e.def.id === defaultApp) ?? null
-    if (!entry || entry === slotted) return
-    if (slotted) for (const menu of slotted.menus) menu.remove()
-    systemMenu.after(...entry.menus)
-    bar.label = entry.def.name
-    slotted = entry
-    syncGates()
+  /**
+   * Take a running application down, as `dispose()` takes every one down:
+   * its windows close, its menus and kinds go, and its setup comes down
+   * through its own `onDispose`, its dialogs with it. Its documents stay.
+   */
+  function stop(id: string): void {
+    const entry = apps.get(id)
+    if (!entry) return
+    apps.delete(id)
+    for (const win of wm.windowsOf(id)) void wm.close(win)
+    if (slotted === entry) {
+      for (const menu of entry.menus) menu.remove()
+      slotted = null
+    }
+    for (const fn of entry.own.splice(0).reverse()) {
+      try {
+        fn()
+      } catch (err) {
+        console.error(`system-online-sdk (${id}): its teardown threw —`, err)
+      }
+    }
+    for (const kind of entry.kinds) if (kinds.get(kind) === entry.def.kinds?.[kind]) kinds.delete(kind)
+    delete actions[id]
+    sync()
   }
+
+  /** A running application failed after it started: its reopen rejected, say. It comes down alone, and says why. */
+  function failed(id: string, error: unknown): void {
+    console.error(`system-online-sdk (${id}): reopening its windows failed, so it doesn't run —`, error)
+    stop(id)
+    if (builtIn(id)) failures.set(id, `its code failed: ${said(error)}`)
+    else installs.failed(id, error)
+    announce()
+  }
+
+  /** The applications whose windows the boot reopened, or will: a later load reopens its own once. */
+  const reopened = new Set<string>()
+  let sessionBack = false
+  /** Reopen an application's windows from the last visit, deepest first, as the boot would have. */
+  async function reopen(id: string): Promise<void> {
+    if (!sessionBack || reopened.has(id)) return
+    reopened.add(id)
+    for (const { item, app } of openWindowsOf(state?.saved ?? null)) {
+      if (app !== id) continue
+      try {
+        await actions[id]?.open?.({ item })
+      } catch (err) {
+        failed(id, err)
+        return
+      }
+    }
+  }
+
+  const installs = createInstalls({
+    catalog,
+    storage: finderDef?.catalog?.storage ?? null,
+    trust,
+    read,
+    builtIn,
+    conflict(def) {
+      for (const kind of Object.keys(def.kinds ?? {})) {
+        if (shellKinds.has(kind)) continue
+        const owner = [...apps.values()].find((a) => a.def.id !== def.id && a.kinds.includes(kind))
+        if (owner) return { kind, app: owner.def.name }
+      }
+      return null
+    },
+    start: (def) => begin(admit(def)),
+    stop,
+    reopen,
+    alert: finderAlert,
+    changed: announce,
+  })
+
+  // Applications: every built-in one's kinds first, then each one's init, in order.
+  for (const entry of definitions.map(admit)) {
+    const failure = begin(entry)
+    if (failure) failures.set(entry.def.id, `its code failed: ${said(failure.error)}`)
+  }
+  if (failures.size) announce()
   teardown.push(wm.onFront(sync), wm.onDialogs(sync))
   sync()
 
@@ -635,9 +921,9 @@ export function createShell(desktop: VfDesktop, options: ShellOptions): Shell {
       label.slot = 'end'
       bar.append(label)
     }
-    const stop = startClock(label)
+    const stopClock = startClock(label)
     teardown.push(() => {
-      stop()
+      stopClock()
       if (made) label!.remove()
     })
   }
@@ -661,19 +947,42 @@ export function createShell(desktop: VfDesktop, options: ShellOptions): Shell {
   }
   if (catalog) teardown.push(catalog.subscribe(follow), wm.onWindows(follow))
 
+  /**
+   * The applications whose saved windows wait for them: every one an icon
+   * names, every built-in one and every installed one, that isn't running.
+   */
+  const waiting = (): string[] => {
+    const named = catalog?.get().items.flatMap((i) => (i.kind === APP_KIND ? [appIdOf(i) ?? ''] : [])) ?? []
+    const known = new Set([...named, ...definitions.map((d) => d.id), ...installs.list().map((a) => a.id)])
+    return [...known].filter((id) => id && !apps.get(id)?.started)
+  }
+
   // The boot.
   state?.hold()
-  const ready = (async () => {
+  void (async () => {
     try {
       // The menu bar renders first, so the work area, the seed and the
       // session's windows all measure it.
       await desktopRendered(desktop)
       if (catalog) {
         await catalog.refresh()
-        if (finderDef?.catalog?.seed) await catalog.seed(finderDef.catalog.seed)
+        markRead()
+        const seed = finderDef?.catalog?.seed
+        if (seed) await catalog.seed((c) => seed(c, installs.install))
+        await installs.boot()
       }
+      markRead()
+      // The session, for every application that runs; one that doesn't
+      // keeps its windows for when it loads.
+      for (const [id, app] of apps) if (app.started) reopened.add(id)
+      sessionBack = true
       for (const { item, app } of openWindowsOf(state?.saved ?? null)) {
-        await actions[app]?.open?.({ item })
+        if (!apps.get(app)?.started) continue
+        try {
+          await actions[app]?.open?.({ item })
+        } catch (err) {
+          failed(app, err)
+        }
       }
       const active = state?.saved?.active
       if (active) {
@@ -682,15 +991,23 @@ export function createShell(desktop: VfDesktop, options: ShellOptions): Shell {
       }
       // After the session, so what they open comes to the front.
       if (catalog && options.startup !== false) {
-        for (const item of startupItemsOf(catalog.get())) await openAsDoubleClick(item.id)
+        for (const item of startupItemsOf(catalog.get())) {
+          try {
+            await openAsDoubleClick(item.id)
+          } catch (err) {
+            console.error(`system-online-sdk: opening ${item.name} at startup failed —`, err)
+          }
+        }
       }
     } finally {
+      markRead()
       if (state) {
-        const stop = state.start(
+        const stopSaving = state.start(
           () => ({
             windows: wm.snapshot(),
             active: wm.itemOf(desktop.activeWindow),
             pattern: desktop.pattern ?? null,
+            waiting: waiting(),
           }),
           (fn) => {
             const offs = [wm.onLayout(fn), wm.onWindows(fn), ...(catalog ? [catalog.subscribe(fn)] : [])]
@@ -705,12 +1022,12 @@ export function createShell(desktop: VfDesktop, options: ShellOptions): Shell {
             }
           }
         )
-        teardown.push(stop)
+        teardown.push(stopSaving)
         // Writes what the boot left on screen.
         state.release()
       }
     }
-  })()
+  })().then(settle, fail)
 
   return {
     desktop,
@@ -718,10 +1035,23 @@ export function createShell(desktop: VfDesktop, options: ShellOptions): Shell {
     catalog,
     apps: actions,
     ready,
+    install: (file, opts) => installs.install(file, opts),
+    uninstall: (id) => installs.uninstall(id),
+    installed: installedList,
+    onInstalled(fn) {
+      installedListeners.add(fn)
+      return () => void installedListeners.delete(fn)
+    },
+    appFile: async (id) => installs.file(id),
     dispose(): void {
-      for (const dispose of disposers.splice(0).reverse()) dispose()
+      installs.dispose()
+      for (const entry of [...apps.values()].reverse()) {
+        for (const fn of entry.own.splice(0).reverse()) fn()
+      }
+      apps.clear()
       if (slotted) for (const menu of slotted.menus) menu.remove()
       slotted = null
+      installedListeners.clear()
       for (const fn of teardown.splice(0)) fn()
       wm.dispose()
       void catalog?.dispose()

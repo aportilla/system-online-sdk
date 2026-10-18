@@ -1,12 +1,13 @@
 /**
  * The Vite plugins. `appFile()` makes an application's build write its app
- * file; `appFiles()` builds app files into a site.
+ * file; `appFiles()` builds app files into a site, or serves them to it as
+ * files to install.
  */
 
 import { mkdir, readFile, writeFile } from 'node:fs/promises'
 import { join, relative, resolve } from 'node:path'
 import type { Plugin } from 'vite'
-import { APP_API, APP_API_OLDEST, appRuns, inspectAppFile, isVersion, satisfies } from '../app-file.js'
+import { APP_API, APP_API_OLDEST, appRuns, checkSignature, inspectAppFile, isVersion, leadingImports, satisfies } from '../app-file.js'
 import type { AppManifest } from '../app-file.js'
 import { VERSION } from '../version.js'
 import { packApp } from './app-file.js'
@@ -16,6 +17,9 @@ const ENTRIES = ['vintage-frames', 'system-online-sdk', 'system-online-sdk/pure'
 
 /** The query that serves an app file's code as a module of its own. */
 const CODE_QUERY = 'app-code'
+
+/** The query that serves an app file as a file, with its manifest. */
+const FILE_QUERY = 'app-file'
 
 export interface AppFileOptions {
   /** The application's id, name, version and author, and its description if it has one: its `app.ts`. */
@@ -55,8 +59,10 @@ async function sdkRange(root: string): Promise<string> {
  * builds the entry as a library, one ES module with the three entries left
  * as imports, and fails the build when the bundle breaks a rule: CSS or any
  * other file beside the code, more than one module, Lit, the kit or the SDK
- * bundled in, or an import of anything but the three entries. `npm run dev`
- * is untouched.
+ * bundled in, an import of anything but the three entries, or one a desktop
+ * can't point at its own copies when it installs the file: a dynamic
+ * import of them, or one outside the declarations the module opens with.
+ * `npm run dev` is untouched.
  */
 export function appFile(options: AppFileOptions): Plugin {
   const { app, entry, icon, artwork, copyTo } = options
@@ -111,6 +117,18 @@ export function appFile(options: AppFileOptions): Plugin {
         if (imports.length) {
           this.error(`${app.name} imports ${imports.join(', ')}. An application imports ${ENTRIES.join(', ')} and its own files.`)
         }
+        // A desktop that installs the file points the names in its head at its own copies, and no others.
+        if (chunk.dynamicImports.length) {
+          this.error(
+            `${app.name} imports ${chunk.dynamicImports.join(', ')} with import(). ` +
+              'An application imports them statically, so a desktop that installs it can load its code.'
+          )
+        }
+        const head = new Set(leadingImports(chunk.code)?.map((i) => i.specifier) ?? [])
+        const elsewhere = chunk.imports.filter((spec) => !head.has(spec))
+        if (elsewhere.length) {
+          this.error(`${app.name}'s code imports ${elsewhere.join(', ')} past the declarations it opens with, where a desktop can't load it.`)
+        }
 
         try {
           const requires = await sdkRange(root)
@@ -153,12 +171,20 @@ function refusal(manifest: AppManifest): string {
 }
 
 /**
- * Builds app files into a site. An import of `*.png?app` reads the file and
- * refuses one that isn't an app file, or one this SDK doesn't run
- * (`appRuns`). Its default export is the application's factory,
- * its definition given the manifest's icon, and `manifest` is the manifest.
- * The code imports the kit and the SDK by name, so the page keeps one copy
- * of each. A new file reloads the dev server's page.
+ * Builds app files into a site, or serves them to it as files. An import of
+ * `*.png?app` or `*.png?app-file` reads the file and refuses one that isn't
+ * an app file, or one this SDK doesn't run (`appRuns`).
+ *
+ * - `?app` builds the application in. Its default export is the
+ *   application's factory, its definition given the manifest's icon and the
+ *   manifest, and `manifest` is the manifest. The code imports the kit and
+ *   the SDK by name, so the page keeps one copy of each.
+ * - `?app-file` builds nothing in. Its default export is the file's URL, an
+ *   asset served byte for byte so its signature holds, for the shell's
+ *   install; `manifest` is the manifest. A signature that doesn't hold is
+ *   refused here, as an install would refuse it.
+ *
+ * A new file reloads the dev server's page.
  */
 export function appFiles(): Plugin {
   let root = ''
@@ -173,10 +199,11 @@ export function appFiles(): Plugin {
       if (query < 0) return null
       const file = id.slice(0, query)
       const params = new URLSearchParams(id.slice(query + 1))
-      if (!file.endsWith('.png') || !(params.has('app') || params.has(CODE_QUERY))) return null
+      if (!file.endsWith('.png') || !(params.has('app') || params.has(CODE_QUERY) || params.has(FILE_QUERY))) return null
       this.addWatchFile(file)
       const name = relative(root, file)
-      const read = await inspectAppFile(new Uint8Array(await readFile(file)))
+      const bytes = new Uint8Array(await readFile(file))
+      const read = await inspectAppFile(bytes)
       if (typeof read === 'string') this.error(`${name} is not an app file: ${read}.`)
       const { manifest, code } = read
       if (params.has(CODE_QUERY)) return code
@@ -186,10 +213,20 @@ export function appFiles(): Plugin {
             `Build ${manifest.name} on system-online-sdk ${VERSION} and copy its app file in.`
         )
       }
+      if (params.has(FILE_QUERY)) {
+        const signature = await checkSignature(bytes)
+        if (signature.status === 'broken') this.error(`${name}: ${manifest.name} ${manifest.version}'s signature doesn't hold: ${signature.reason}.`)
+        return [
+          `import url from ${JSON.stringify(`${file}?url`)}`,
+          `export const manifest = ${JSON.stringify(manifest)}`,
+          'export default url',
+          '',
+        ].join('\n')
+      }
       return [
         `import factory from ${JSON.stringify(`${file}?${CODE_QUERY}`)}`,
         `export const manifest = ${JSON.stringify(manifest)}`,
-        'export default (...args) => ({ ...factory(...args), icon: manifest.icon })',
+        'export default (...args) => ({ ...factory(...args), icon: manifest.icon, manifest })',
         '',
       ].join('\n')
     },

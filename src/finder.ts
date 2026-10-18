@@ -26,6 +26,15 @@
  * - A suitcase, the shell's `font` kind, wears the site's suitcase art and
  *   opens in the application that says it opens suitcases. With none, an
  *   alert says so.
+ * - A document whose kind no application registers wears the document art,
+ *   and opening it says no application opens it, as a suitcase nothing
+ *   opens does. An application's icon whose application didn't load, or
+ *   isn't on the desktop, says why when it's opened.
+ * - A file dropped on the desktop or a folder window is offered to the
+ *   kinds where it was let go, so an app file installs there; one pasted,
+ *   at the next free cell. The shell's install asks its questions in the
+ *   Finder's alerts: whether to replace an application already there, and
+ *   whether to install one the site's trust doesn't vouch for.
  * - Menus: File (Open, New Folder, Close, Make Alias), Edit (Copy, Paste,
  *   Select All), View (Arrange Windows), Special (Clean Up, Empty Trash…),
  *   each disabled while it has nothing to act on. A site switches commands
@@ -91,6 +100,8 @@ import type { Lattice, LatticeOptions, Pin, Point, Size } from './geometry.js'
 import { fileByDrag } from './filing.js'
 import { composeAlert } from './alert.js'
 import type { AlertOptions } from './alert.js'
+import type { AppManifest, Standing } from './app-file.js'
+import type { Install, InstallRefusal, SkipReason } from './installs.js'
 import { defineApp } from './shell.js'
 import type { AppContext, AppDefinition } from './shell.js'
 import { desktopRendered } from './windows.js'
@@ -126,6 +137,9 @@ export interface FinderArt {
 /** What a failed command was, in the `failed` alert. */
 export type FinderFailedAction = 'new-folder' | 'empty-trash' | 'paste' | 'add-file' | 'make-alias'
 
+/** Why an application's icon didn't open: why it didn't load, or `missing`, for one neither built in nor installed. */
+export type UnavailableReason = SkipReason | 'missing'
+
 /** The Finder's alerts, by id, with the details each one's handler gets. */
 export interface FinderAlerts {
   /** Special → Empty Trash…: an answer of `'ok'` empties the Trash. */
@@ -140,8 +154,32 @@ export interface FinderAlerts {
   'move-failed': { error: Error }
   /** Opening an alias whose original is gone, or a drop onto an alias of a folder whose original is gone. */
   'original-missing': { alias: Item }
-  /** Opening a suitcase, through an alias too, while no application says it opens suitcases: the suitcase. */
+  /**
+   * Opening a document no application opens, through an alias too: one
+   * whose kind no application registers, or a suitcase while no application
+   * says it opens suitcases. The document, its kind on it.
+   */
   'no-application': { item: Item }
+  /**
+   * Opening an application's icon, through an alias too, when the
+   * application didn't load or isn't on the desktop: the icon, the
+   * application's id and manifest where its file reads, and why.
+   */
+  'application-unavailable': { item: Item; app: string; manifest: AppManifest | null; why: UnavailableReason; reason: string }
+  /**
+   * A dropped or pasted app file whose application is already on the
+   * desktop: its manifest, the version installed (null for icons with no
+   * file) and the file's standing. An answer of `'replace'` replaces it.
+   */
+  'replace-application': { manifest: AppManifest; installed: string | null; standing: Standing }
+  /**
+   * An install the site's trust asks about: a file no key the site holds
+   * signed, unsigned or signed by another key. An answer of `'install'`
+   * installs it.
+   */
+  'untrusted-application': { manifest: AppManifest; standing: 'untrusted' | 'unsigned'; key: string | null }
+  /** A dropped or pasted app file the shell refused: its file's name, its manifest where it read, and why. */
+  'install-refused': { name: string; manifest: AppManifest | null; why: InstallRefusal; reason: string }
   /** New Folder, Empty Trash, Paste, Make Alias or a dropped file failed. */
   failed: { action: FinderFailedAction; error: Error }
 }
@@ -212,6 +250,12 @@ export interface FinderApi {
   /** Answer one of the Finder's alerts with the site's own dialog. Call it from `extend`. */
   alertWith<K extends FinderAlert>(id: K, handler: FinderAlertHandler<K>): void
   /**
+   * Raise one of the Finder's alerts, as the Finder does: the site's handler
+   * where `alertWith` gave one, else the Finder's own. Resolves the answer,
+   * or null. The shell asks its install's questions this way.
+   */
+  alert<K extends FinderAlert>(id: K, details: FinderAlerts[K]): Promise<string | null>
+  /**
    * Whether storage answers. When it doesn't, raises Storage Unavailable —
    * the site's answer to it, where `alertWith` gave one — and returns false.
    */
@@ -235,9 +279,10 @@ export interface FinderOptions {
    * the `<vf-icon data-app>`, `<vf-icon data-font="Family">` and
    * `<template data-folder="Name">` the page put in the desktop's field, and
    * a `<template data-system="apple-menu-items">` files what it holds in that
-   * folder of the System Folder; a function stores the site's defaults.
+   * folder of the System Folder; a function stores the site's defaults, and
+   * installs the applications a new desktop comes with through `install`.
    */
-  seed?: 'markup' | ((catalog: Catalog) => void | Promise<void>)
+  seed?: 'markup' | ((catalog: Catalog, install: Install) => void | Promise<void>)
   /** The lattices' cells, pitches and insets (default: 64px cells, 80px columns, 72px rows, 16px insets). */
   lattice?: { desktop?: LatticeOptions; folder?: LatticeOptions }
   /** Clean Up the desktop once a resize settles with icons overlapping. Default false. */
@@ -265,6 +310,71 @@ const FAILED: Record<FinderFailedAction, string> = {
   paste: 'Paste',
   'add-file': 'Adding the file',
   'make-alias': 'Make Alias',
+}
+
+/** Each of the Finder's own alerts: its message for its details, and its label and buttons where they aren't an OK alone. */
+const ALERTS: { [K in FinderAlert]: (details: FinderAlerts[K]) => { message: string; options?: AlertOptions } } = {
+  'empty-trash': ({ count, bytes }) => {
+    const k = Math.ceil(bytes / 1024)
+    return {
+      message:
+        count === 1
+          ? `The Trash contains 1 item, which uses ${k}K of disk space. Are you sure you want to permanently remove it?`
+          : `The Trash contains ${count} items, which use ${k}K of disk space. Are you sure you want to permanently remove these items?`,
+      options: {
+        label: 'Empty Trash',
+        buttons: [
+          { label: 'Cancel', value: 'cancel' },
+          { label: 'OK', value: 'ok', default: true },
+        ],
+      },
+    }
+  },
+  'storage-unavailable': () => ({
+    message: 'Files can’t be saved in this browser session. A private window, perhaps.',
+    options: { label: 'Storage Unavailable' },
+  }),
+  'name-too-long': ({ limit }) => ({ message: `That name is too long. A name can have up to ${limit} characters.` }),
+  'name-rejected': () => ({ message: 'An item needs a name.' }),
+  'move-failed': ({ error }) => ({ message: `The items couldn’t be moved: ${error.message}.` }),
+  'original-missing': ({ alias }) => ({
+    message: `The alias “${alias.name}” could not be opened, because the original item could not be found.`,
+  }),
+  'no-application': ({ item }) => ({
+    message: `The document “${item.name}” could not be opened, because the application that opens it could not be found.`,
+  }),
+  'application-unavailable': ({ item, manifest, reason }) => ({
+    message: `The application “${manifest?.name ?? item.name}” could not be opened, because ${reason}.`,
+  }),
+  'replace-application': ({ manifest, installed }) => ({
+    message:
+      installed != null
+        ? `“${manifest.name}” ${installed} is already on this desktop. Do you want to replace it with version ${manifest.version}?`
+        : `“${manifest.name}” is already on this desktop. Do you want to install version ${manifest.version} for it?`,
+    options: {
+      label: 'Replace',
+      buttons: [
+        { label: 'Cancel', value: 'cancel' },
+        { label: 'Replace', value: 'replace', default: true },
+      ],
+    },
+  }),
+  'untrusted-application': ({ manifest, standing }) => ({
+    message:
+      `“${manifest.name}” by ${manifest.author} ` +
+      `${standing === 'unsigned' ? 'isn’t signed' : 'is signed by a key this desktop doesn’t trust'}. ` +
+      'Once it’s installed, it can read and change everything on this desktop. Do you want to install it?',
+    // Return cancels: installing what nobody vouched for takes a press of its own.
+    options: {
+      label: 'Install',
+      buttons: [
+        { label: 'Install', value: 'install' },
+        { label: 'Cancel', value: 'cancel', default: true },
+      ],
+    },
+  }),
+  'install-refused': ({ name, reason }) => ({ message: `“${name}” could not be installed, because ${reason}.` }),
+  failed: ({ action, error }) => ({ message: `${FAILED[action]} failed: ${error.message}.` }),
 }
 
 /** A folder window's header: its count line, a white row and the header's rule. */
@@ -437,14 +547,10 @@ export function finder(options: FinderOptions): AppDefinition<FinderApi> {
        * One of the Finder's alerts: the site's handler where it set one, else
        * the Finder's own, held while it is up. Resolves the answer, or null.
        */
-      async function alert<K extends FinderAlert>(
-        id: K,
-        details: FinderAlerts[K],
-        message: string,
-        opts: AlertOptions = {}
-      ): Promise<string | null> {
+      async function alert<K extends FinderAlert>(id: K, details: FinderAlerts[K]): Promise<string | null> {
         const handler = handlers.get(id) as FinderAlertHandler<K> | undefined
         if (handler) return handler(details)
+        const { message, options: opts = {} } = ALERTS[id](details)
         const own = composeAlert(message, { art: art.caution ?? null, ...opts })
         ctx.hold(own.dialog)
         try {
@@ -457,8 +563,7 @@ export function finder(options: FinderOptions): AppDefinition<FinderApi> {
         }
       }
       const failed = (action: FinderFailedAction) => (err: unknown) => {
-        const error = err as Error
-        void alert('failed', { action, error }, `${FAILED[action]} failed: ${error.message}.`)
+        void alert('failed', { action, error: err as Error })
       }
 
       // The desktop's field: the page's, or one made for it. The page's
@@ -715,6 +820,8 @@ export function finder(options: FinderOptions): AppDefinition<FinderApi> {
 
       ctx.onDispose(catalog.subscribe(sync))
       ctx.onDispose(windows.onWindows(sync))
+      // An application that comes or goes brings its kinds' art, or takes it.
+      ctx.onInstalled(() => sync())
 
       /* ── Folder windows ────────────────────────────────────────────── */
 
@@ -794,20 +901,12 @@ export function finder(options: FinderOptions): AppDefinition<FinderApi> {
 
       /** An alias whose original is gone was opened, or dropped onto: say so. */
       function originalMissing(alias: Item): void {
-        void alert(
-          'original-missing',
-          { alias },
-          `The alias “${alias.name}” could not be opened, because the original item could not be found.`
-        )
+        void alert('original-missing', { alias })
       }
 
-      /** A suitcase was opened, and no application says it opens suitcases: say so. */
+      /** A document no application opens was opened: a suitcase nothing opens, or a kind nothing registers. Say so. */
       function noApplication(item: Item): void {
-        void alert(
-          'no-application',
-          { item },
-          `The document “${item.name}” could not be opened, because the application that opens it could not be found.`
-        )
+        void alert('no-application', { item })
       }
 
       /**
@@ -822,12 +921,13 @@ export function finder(options: FinderOptions): AppDefinition<FinderApi> {
           originalMissing(item)
           return
         }
+        const kind = ctx.kind(target.kind)
         if (isContainerKind(target.kind)) {
           windows.open({ app: FINDER, item: target.id, from, create: () => makeFolderWindow(target.id) })
-        } else if (target.kind === FONT_KIND && !ctx.opener(FONT_KIND)) {
+        } else if (!kind || (target.kind === FONT_KIND && !ctx.opener(FONT_KIND))) {
           noApplication(target)
         } else {
-          ctx.kind(target.kind)?.open(target, from)
+          kind.open(target, from)
         }
       }
       ctx.on(desktop, 'vf-open', (e) => {
@@ -893,12 +993,12 @@ export function finder(options: FinderOptions): AppDefinition<FinderApi> {
         if (!isFinders(e) || warning) return
         warning = true
         const { limit } = (e as CustomEvent<{ limit: number }>).detail
-        void alert('name-too-long', { limit }, `That name is too long. A name can have up to ${limit} characters.`).finally(() => {
+        void alert('name-too-long', { limit }).finally(() => {
           warning = false
         })
       })
       ctx.on(desktop, 'vf-name-rejected', (e) => {
-        if (isFinders(e)) void alert('name-rejected', {}, 'An item needs a name.')
+        if (isFinders(e)) void alert('name-rejected', {})
       })
 
       /* ── Filing ────────────────────────────────────────────────────── */
@@ -933,7 +1033,7 @@ export function finder(options: FinderOptions): AppDefinition<FinderApi> {
             }
             const at = new Map([...landings].map(([icon, p]) => [idOf(icon), p]))
             catalog.move(icons.map(idOf), parent, at).catch((error: Error) => {
-              void alert('move-failed', { error }, `The items couldn’t be moved: ${error.message}.`)
+              void alert('move-failed', { error })
             })
           },
         })
@@ -1022,9 +1122,7 @@ export function finder(options: FinderOptions): AppDefinition<FinderApi> {
       /** Whether storage answers; an alert says when it doesn't. */
       const storageReady = (): boolean => {
         if (catalog.get().available) return true
-        void alert('storage-unavailable', {}, 'Files can’t be saved in this browser session. A private window, perhaps.', {
-          label: 'Storage Unavailable',
-        })
+        void alert('storage-unavailable', {})
         return false
       }
 
@@ -1079,19 +1177,7 @@ export function finder(options: FinderOptions): AppDefinition<FinderApi> {
       async function emptyTrash(): Promise<void> {
         const n = itemCount(catalog.get(), TRASH)
         if (!hasTrash || !n) return
-        const bytes = catalog.trashSize()
-        const k = Math.ceil(bytes / 1024)
-        const message =
-          n === 1
-            ? `The Trash contains 1 item, which uses ${k}K of disk space. Are you sure you want to permanently remove it?`
-            : `The Trash contains ${n} items, which use ${k}K of disk space. Are you sure you want to permanently remove these items?`
-        const answer = await alert('empty-trash', { count: n, bytes }, message, {
-          label: 'Empty Trash',
-          buttons: [
-            { label: 'Cancel', value: 'cancel' },
-            { label: 'OK', value: 'ok', default: true },
-          ],
-        })
+        const answer = await alert('empty-trash', { count: n, bytes: catalog.trashSize() })
         if (answer === 'ok') await catalog.emptyTrash().catch(failed('empty-trash'))
       }
 
@@ -1127,10 +1213,13 @@ export function finder(options: FinderOptions): AppDefinition<FinderApi> {
         }
       }
 
-      /** Offer a file to every kind that makes items of files, in order; resolves whether one did. */
-      async function claim(file: Blob, parent: string | null): Promise<boolean> {
+      /**
+       * Offer a file to every kind that makes items of files, in order, with
+       * where it was let go, if it was; resolves whether one did.
+       */
+      async function claim(file: Blob, parent: string | null, at: Point | null = null): Promise<boolean> {
         for (const kind of ctx.kinds.values()) {
-          if (kind.claim && (await kind.claim(file, parent))) return true
+          if (kind.claim && (await kind.claim(file, parent, at))) return true
         }
         return false
       }
@@ -1192,8 +1281,17 @@ export function finder(options: FinderOptions): AppDefinition<FinderApi> {
         void paste({ text: data.getData('text/plain') || null, files: [...data.files] })
       })
 
-      // A file dropped on the desktop goes the same way, into the folder window under it.
+      // A file dropped on the desktop goes the same way, into the folder
+      // window under it, the first where it was let go: its icon's art
+      // centred on the pointer. The rest take the next free cells.
       const hasFiles = (e: Event) => [...((e as DragEvent).dataTransfer?.types ?? [])].includes('Files')
+      const ART = 32
+      const landing = (drop: DragEvent, win: VfWindow | null): Point => {
+        const p = (win ?? desktop).placementAt(drop.clientX, drop.clientY)
+        const width = win ? folderCell : cell
+        const floor = win ? 0 : desktop.workArea.top
+        return { left: Math.max(0, Math.round(p.left - width / 2)), top: Math.max(floor, Math.round(p.top - ART / 2)) }
+      }
       ctx.on(desktop, 'dragover', (e) => {
         if (hasFiles(e) && claims()) e.preventDefault()
       })
@@ -1211,8 +1309,9 @@ export function finder(options: FinderOptions): AppDefinition<FinderApi> {
         if (!storageReady()) return
         const folder = win ? windows.itemOf(win) : null
         if (isTrashed(catalog.get(), folder)) return
+        const at = landing(drop, (win as VfWindow | undefined) ?? null)
         void (async () => {
-          for (const file of files) await claim(file, folder)
+          for (const [i, file] of files.entries()) await claim(file, folder, i ? null : at)
         })().catch(failed('add-file'))
       })
 
@@ -1308,6 +1407,7 @@ export function finder(options: FinderOptions): AppDefinition<FinderApi> {
         alertWith(id, handler) {
           handlers.set(id, handler)
         },
+        alert,
         storageReady,
       }
       options.extend?.(api, ctx)

@@ -59,7 +59,8 @@
     "verify:front": "node scripts/verify-front.mjs",
     "verify:windows": "node scripts/verify-windows.mjs",
     "verify:finder": "node scripts/verify-finder.mjs",
-    "verify:fonts": "node scripts/verify-fonts.mjs"
+    "verify:fonts": "node scripts/verify-fonts.mjs",
+    "verify:installs": "tsc -p tsconfig.unit.json --outDir scripts/.tmp/installs && node scripts/verify-installs.mjs"
   },
   "peerDependencies": {
     "vintage-frames": "^0.20.0",

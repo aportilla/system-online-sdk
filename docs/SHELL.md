@@ -1,6 +1,6 @@
 # The shell
 
-`system-online-sdk` runs applications over one desktop: a window manager, a menu bar that shows the front application's menus, a catalog of what is where, a stock Finder that shows the catalog as icons, and the fonts the site gives its system. It is plain modules over [vintage-frames](https://github.com/aportilla/vintage-frames)' elements. It registers no elements, writes no styles, ships no art or fonts and composes no UI: every window and dialog on screen is an application's or the page's. It reaches the kit only through `vintage-frames`' root exports, so the page imports `vintage-frames` first.
+`system-online-sdk` runs applications over one desktop: a window manager, a menu bar that shows the front application's menus, a catalog of what is where, a stock Finder that shows the catalog as icons, the fonts the site gives its system, and app files installed while it runs. It is plain modules over [vintage-frames](https://github.com/aportilla/vintage-frames)' elements. It registers no elements, writes no styles, ships no art or fonts and composes no UI: every window and dialog on screen is an application's or the page's. It reaches the kit only through `vintage-frames`' root exports, so the page imports `vintage-frames` first.
 
 The shell is experimental. Its API may change in any minor release until sprite-machine runs on all of it.
 
@@ -52,7 +52,7 @@ The desktop needs a `vf-menu-bar`, and the bar's first `vf-menu` is the system m
 
 | Option | |
 | --- | --- |
-| `apps` | The applications. The first with a `catalog` is the Finder. |
+| `apps` | The applications built in. The first with a `catalog` is the Finder. Two with one id, or a kind two of them register, stop `createShell`. |
 | `defaultApp` | The application in front while no window is active. Default: the Finder. |
 | `fit` | `'viewport'` sizes the desktop to the viewport, on every resize and scale change. |
 | `state` | Where the session is saved (§ Saved state). Default `null`: a reload resets. |
@@ -60,6 +60,8 @@ The desktop needs a `vf-menu-bar`, and the bar's first `vf-menu` is the system m
 | `fonts` | The families the site serves its system (§ Fonts). Default none. |
 | `clock` | The time in the bar's `end` slot. Default `true`. |
 | `startup` | Open what Startup Items holds once the session is back. Default `true`; `false` skips it for this boot. |
+| `trust` | The public keys the site trusts, and what a file none of them signed gets (§ Trust). Default none: any app file installs. |
+| `index` | The URL of the site's index of app files, handed to every application as `ctx.index` (§ The index). Default none. |
 
 The page around a `fit: 'viewport'` desktop is the page's own CSS; the shell writes none:
 
@@ -88,7 +90,7 @@ document.addEventListener('gesturestart', (e) => e.preventDefault())
 
 Panning stays, so a finger still scrolls a window.
 
-`createShell()` returns `{ desktop, windows, catalog, apps, ready, dispose() }`. `ready` settles once the desktop and its menu bar have rendered, the catalog is read, the seed stored, the last session's windows reopened and Startup Items opened. `dispose()` takes everything down, the applications' own setup and every window included, so a hot reload starts clean. The saved session stops before the windows go, so with `state` set the reload reopens them.
+`createShell()` returns `{ desktop, windows, catalog, apps, ready, install, uninstall, installed, onInstalled, appFile, dispose() }`. `ready` settles once the desktop and its menu bar have rendered, the catalog is read, the seed stored, the installed applications loaded, the last session's windows reopened and Startup Items opened. `install()` and the rest are the installs (§ Installing applications). `dispose()` takes everything down, the applications' own setup and every window included, so a hot reload starts clean. The saved session stops before the windows go, so with `state` set the reload reopens them.
 
 ## Applications
 
@@ -118,6 +120,7 @@ export const notePad = defineApp({
 | --- | --- |
 | `id`, `name` | `name` is the bar's accessible name while the application is in front. |
 | `icon` | Its 32×32 art, for its icon in the Finder. |
+| `manifest` | The manifest of the app file it came from. `?app` and an install set it. |
 | `menus` | `vf-menu` elements, each with a `data-menu` name. |
 | `dialogs` | Its dialogs, each with a `data-dialog` name (§ Dialogs). |
 | `windows` | Its windows, each with a `data-window` name, kept inert until `ctx.window()` copies one. |
@@ -125,7 +128,9 @@ export const notePad = defineApp({
 | `opens` | The shell's kinds it opens: `['font']`, for an application that opens font suitcases (§ Fonts). |
 | `init(ctx)` | Sets the application up and returns its actions, which other applications call. An application whose windows reopen after a reload, or that opens from an icon, returns `open({ item, from })`. |
 
-An application can live in a repo of its own and ship as one PNG, its app file, which a site builds in ([APP-FILES.md](./APP-FILES.md)).
+An application can live in a repo of its own and ship as one PNG, its app file, which a site builds in or installs while it runs ([APP-FILES.md](./APP-FILES.md), § Installing applications).
+
+An `init` that throws takes that application down alone: the console names it and its error, and what's installed says it didn't load. The rest of the desktop starts.
 
 The bar holds the system menu, then the front application's menus, then the clock. The front application is the active window's, or the default application while no window is active. Each application's menus are parsed once and the same elements come back each time it is in front, so their state holds. Only the front application's key equivalents work, since the others' menus are off the bar. Browsers keep ⌘W, ⌘N and ⌘Q, so use ⌃W, ⌃N and ⌃Q.
 
@@ -148,8 +153,12 @@ What `init` gets:
 | `apps`, `app(id)`, `opener(kind)` | Every application's actions, read at the call, and the definitions. `opener('font')` is the application that opens font suitcases, or undefined (§ Fonts). |
 | `catalog`, `kinds`, `kind(name)` | The catalog, when a Finder runs, and the registered kinds, the shell's `app`, `alias` and `font` first. |
 | `fonts` | The system's fonts: the installed families, any family the site serves, a strike loaded on request, and a notice when the installed families change (§ Fonts). |
+| `install(file, options)`, `uninstall(id)` | Install an app file through the site's trust, and uninstall an installed application (§ Installing applications). |
+| `installed()`, `onInstalled(fn)`, `appFile(id)` | What's installed, every application built in or installed; a notice each time any of it changes, torn down with the application; and an installed application's file. |
+| `ready` | Settles once the boot is done: every application loaded or skipped, the session reopened. |
+| `index` | The URL of the site's index of app files, or `null` (§ The index). |
 | `services`, `state` | The site's objects and the saved session. |
-| `on(target, type, fn)`, `onDispose(fn)` | A listener and a teardown, both undone by `dispose()`. |
+| `on(target, type, fn)`, `onDispose(fn)` | A listener and a teardown, both undone by `dispose()`, and by an uninstall. |
 
 ## Dialogs
 
@@ -256,11 +265,13 @@ The catalog is the source of truth for what is where. It is pure: it runs under 
 
 - The Trash and a startup disk are volumes: containers with no record, listed first, each if the site wants one (`volumes: { trash: 'Trash', disk: 'Macintosh HD' }`). A volume can't be renamed, moved, copied or removed, and nothing is made in the Trash. Deleting is a move into the Trash. Only Empty Trash removes. The System Folder and its folders are kept the same way, listed after the volumes (§ The System Folder).
 - A folder never goes into itself or a folder inside it. New folders are "untitled folder", then "untitled folder 2". Copies are "Name copy", then "Name copy 2". Aliases are "Name alias", then "Name alias 2".
-- An item whose kind no application registers is kept in storage and left out of the listing.
+- Every item is listed, whether or not an application registers its kind, so a document outlives the application that opens it (§ Documents nothing opens).
 - Storage is three calls: `list()`, `put(item)`, `remove(id)`. `memoryStorage()` forgets on reload and `indexedDbStorage(name)` keeps. A site can write its own. Without working storage the catalog lists the volumes and the System Folder alone, and the Finder says so when asked to save.
+- A record whose id starts with `#` is the shell's own, kept in the same storage beside the items: the seed's marker, and each installed application's file. The catalog never lists, dumps, imports or clears one.
 - A seed is stored once per storage. `seed: 'markup'` reads the `vf-icon[data-app]`, `vf-icon[data-font]`, `template[data-folder]` and `template[data-system]` in the desktop's field (§ The Finder); a function stores the site's defaults through the catalog.
 - Positions are on the items, so they persist wherever the catalog does. Position changes are written a moment after they settle.
-- Selectors: `childrenOf`, `itemCount`, `isInside`, `enclosingFolders`, `isTrashed`, `isKept`, `descendantsOf`, `nextFolderName`, `copyName`, `aliasName`, `originalOf`, `resolve`, `canAlias`, `dropTargetOf`, `appleMenuItemsOf`, `appleMenuOf`, `startupItemsOf`, `fontFamilyOf`, `installedFamiliesOf`. Operations: `create`, `rename`, `update`, `move`, `place`, `copy`, `emptyTrash`, `clear`, `import`, `dump`.
+- Selectors: `childrenOf`, `itemCount`, `isInside`, `enclosingFolders`, `isTrashed`, `isKept`, `descendantsOf`, `nextFolderName`, `copyName`, `aliasName`, `originalOf`, `resolve`, `canAlias`, `dropTargetOf`, `appleMenuItemsOf`, `appleMenuOf`, `startupItemsOf`, `fontFamilyOf`, `installedFamiliesOf`. Operations: `create`, `rename`, `update`, `move`, `place`, `copy`, `remove`, `emptyTrash`, `clear`, `import`, `dump`.
+- `remove(ids)` removes items at once, wherever they are, the Trash included, a folder with everything in it, each kind dropping its payload. It never removes a kept container. An uninstall removes an application's icons this way; anything a visitor deletes goes through the Trash.
 - `import(archive, { mode })` restores a `dump()`. `'replace'` clears the catalog first and keeps the archive's ids; `'merge'`, the default, adds the archive under fresh ids, nesting kept. It resolves a `Map` from each archive id to the item it stored, so a kind whose payload is keyed by item id can carry it over a merge. The listing is announced once, when the import is done, so a window whose item comes back stays open.
 
 A kind tells the Finder how its items look and open:
@@ -273,14 +284,14 @@ A kind tells the Finder how its items look and open:
 | `size(item)` | Bytes, for Empty Trash's alert. |
 | `copy(from, to)` | Copies the item's payload when the Finder copies it. |
 | `onRemove(item)` | Drops the payload when Empty Trash removes the item. |
-| `claim(file, parent)` | Makes an item of a pasted or dropped file. Resolves whether it did. |
+| `claim(file, parent, at)` | Makes an item of a pasted or dropped file in `parent`. `at` is where a dropped file was let go, the item's place there in whole system px; a paste gives none, for the next free cell. Resolves whether it did. |
 | `export(item)` | The item as a file, for the system clipboard. |
 
 Small data goes in `data`. A large payload stays in the application's own store, under the item's id, and `copy` and `onRemove` keep that store in step.
 
 The shell registers three kinds itself, `app`, `alias` and `font`, and an application's `kinds` can't replace them: one under any of their names is left out, and the console names the application. `font` is a font suitcase (§ Fonts).
 
-`app` is an application's icon, which opens the application. It takes its name and art from the application, keeps a name the markup gives it, and can't be renamed. Its `data` names the application, `{ app: id }`. A seed function stores one as `catalog.create({ kind: APP_KIND, name, parent, data: { app: id } })`, and `appIdOf(item)` reads the id back, or null. Both names come from either entry.
+`app` is an application's icon, which opens the application. It takes its name and art from the application, keeps a name the markup gives it, and can't be renamed. Its `data` names the application, `{ app: id }`. A seed function stores one as `catalog.create({ kind: APP_KIND, name, parent, data: { app: id } })`, and `appIdOf(item)` reads the id back, or null. Both names come from either entry. The kind also carries installed applications (§ Installing applications): it claims an app file dropped or pasted, an installed one's icon is drawn from its manifest's icon, loaded or not, Copy puts its file on the system clipboard, and Empty Trash weighs its file once its every icon is in the Trash. Opening one that didn't load, or one whose application is neither built in nor installed, raises the Finder's `application-unavailable` alert.
 
 `alias` is an item standing for another: an application, a document, a folder or the startup disk. Its `data` names the original and the original's kind, `{ original: id, kind }`, and `originalOf(item)` reads the id back, or null. An alias with no `kind` is read as an application's or a document's, the only aliases there were before aliases kept one. `resolve(state, id)` is the item an id names, or the original an alias stands for, wherever it was moved and whatever it was renamed, through an alias of an alias too; null once the original is removed. The Finder draws an alias with its original's art and its name in italics, and opening it opens the original: an alias of a folder or the disk opens the original's window. Copying an alias makes another alias of the same original, trashing one leaves its original alone, and `import()` keeps an alias pointing at its original when the import gives items new ids.
 
@@ -350,7 +361,8 @@ finder({
 - Filing: a drop onto a folder icon files into that folder at its next free cells, and a drop onto an alias of one into the original, judged there. A drop into a folder window lands where the icons were let go, and so does a drop out of a window onto the desktop. The folder under the pointer is highlighted. A drop over another application's window moves nothing.
 - Renaming goes to the catalog. A name that is too long or empty gets an alert.
 - A file dropped on the desktop or in a folder window brings the Finder forward, as a press does.
-- Copy puts the selected items' names on the system clipboard, with a file from the first kind that exports one. Paste copies what the Finder copied, while the system clipboard still holds those names or can't be read. Otherwise it offers the clipboard's files to the kinds' `claim`. A file dropped on the desktop goes the same way, into the folder window under it.
+- Copy puts the selected items' names on the system clipboard, with a file from the first kind that exports one. Paste copies what the Finder copied, while the system clipboard still holds those names or can't be read. Otherwise it offers the clipboard's files to the kinds' `claim`. A file dropped on the desktop goes the same way, into the folder window under it, the first file with where it was let go: its icon's art centred on the pointer. An app file dropped or pasted installs (§ Installing applications).
+- A document whose kind no application registers is drawn with the `document` art, and opening it raises the `no-application` alert (§ Documents nothing opens).
 - Clean Up moves each icon of the active window, or the desktop, to the free cell nearest it, one at a time. Icons past the last cell share it. The desktop's icons follow the screen's edges on a resize. With `cleanUpAfterResize`, overlapping icons are cleaned up once the resize settles.
 
 | Menu | Commands |
@@ -391,6 +403,7 @@ finder({
 | `iconFor(id)` | The item's icon, where one is shown. |
 | `addCommand(spec)` | A command in one of the Finder's menus. Call it from `extend`. |
 | `alertWith(id, handler)` | Answers one of the Finder's alerts in its place. Call it from `extend`. |
+| `alert(id, details)` | Raises one of the Finder's alerts as the Finder does: the site's handler where `alertWith` gave one, else the Finder's own. Resolves the answer, or `null`. The shell asks its install's questions this way. |
 | `storageReady()` | Whether storage answers. When it doesn't, it raises Storage Unavailable, answered by the site's `alertWith` handler where there is one, and returns `false`. A site's own command that saves calls it first, so every save says the same thing. |
 
 ### The Finder's alerts
@@ -419,10 +432,14 @@ finder({
 | `name-rejected` | A rename to nothing | none | none |
 | `move-failed` | A filing storage refused | `{ error }` | none |
 | `original-missing` | Opening an alias whose original is gone, or a drop onto an alias of a folder whose original is gone | `{ alias }`, the alias's item | none |
-| `no-application` | Opening a font suitcase, or an alias of one, while no application says it opens suitcases | `{ item }`, the suitcase | none |
+| `no-application` | Opening a document no application opens, through an alias too: one whose kind no application registers, or a font suitcase while no application says it opens suitcases | `{ item }`, the document, its kind on it | none |
+| `application-unavailable` | Opening an application's icon, or an alias of one, when the application didn't load or is neither built in nor installed | `{ item, app, manifest, why, reason }`: the icon, the application's id, its manifest where its file reads (else `null`), why it didn't load (§ What's installed) or `'missing'`, and the words for people | none |
+| `replace-application` | A dropped or pasted app file whose application is already on the desktop | `{ manifest, installed, standing }`: the file's manifest, the version installed (`null` for icons with no file) and the file's standing | `'replace'` replaces it |
+| `untrusted-application` | An install the site's trust asks about: a file no key the site holds signed (§ Trust) | `{ manifest, standing, key }`: `'unsigned'`, or `'untrusted'` and the key that signed it | `'install'` installs it |
+| `install-refused` | A dropped or pasted app file the shell refused, a Cancel aside | `{ name, manifest, why, reason }`: the file's name, its manifest where it read, and why (§ Installing applications) | none |
 | `failed` | New Folder, Empty Trash, Paste, Make Alias or a dropped file failed | `{ action, error }`: `'new-folder'`, `'empty-trash'`, `'paste'`, `'make-alias'` or `'add-file'` | none |
 
-An alert with no handler is the Finder's own.
+An alert with no handler is the Finder's own. `untrusted-application`'s default button is Cancel, so installing what nobody vouched for takes a press of its own.
 
 ## Fonts
 
@@ -537,6 +554,151 @@ init(ctx) {
 - `installedFamiliesOf(state, families)` is `installed()`'s rule, pure, for a site's tests: the families of `families` that `state`, a catalog's listing, installs, and every one for `null`.
 - An application on a page older than `ctx.fonts` finds none, and that page lists no suitcase. One that wants such pages checks for `ctx.fonts` before it uses it.
 
+## Installing applications
+
+An application can join the desktop while it runs: an app file installed at runtime ([APP-FILES.md](./APP-FILES.md)). It registers as one in `apps` does, its kinds, menus, dialogs, windows and `init`, and comes down when it's uninstalled. Every way in is one install: a file dropped or pasted in the Finder, a seed, a site's own command, the site through the shell, and an application, a store say, through `ctx`.
+
+```ts
+const bytes = new Uint8Array(await (await fetch(url)).arrayBuffer())
+let answer = await ctx.install(bytes)
+if (answer.status === 'present' && (await askToReplace(answer))) answer = await ctx.install(bytes, { replace: true })
+if (answer.status === 'refused') say(`It can’t be installed, because ${answer.reason}.`)
+```
+
+`install(file, options)`, on the shell and on `ctx`, takes the file as a `Blob`, an `ArrayBuffer` or a `Uint8Array`. It reads it (`inspectAppFile`), checks that this SDK runs it (`appRuns`) and its signature against the site's trust, asking first when the trust says to (§ Trust), keeps the file, loads its code and registers the application, then makes its icon, named for it. Installs go one at a time: one waits for the question another asked.
+
+| `options` | |
+| --- | --- |
+| `parent` | The container the icon goes in: a folder's id, or `null` for the desktop, the default. One in the Trash is the desktop. |
+| `at` | The icon's place there, whole system px. Unset, the container's next free cell. |
+| `replace` | Put the file in place of what's installed under its id, whatever its version, or give it to the icons that have none (§ Updating). |
+
+It resolves what happened:
+
+| `status` | |
+| --- | --- |
+| `installed` | A new icon, and the application runs. `app` is its entry in what's installed. |
+| `updated` | Its file replaced the one kept, or went to icons that had none: `app`, and `previous`, the version it replaced, or `null`. |
+| `present` | Nothing changed: the application is already on the desktop, as `app`, or as icons with no file (`app` is `null`). `manifest` and `standing` are the file's, for the question a caller asks before it says `replace`. |
+| `refused` | `why`, a word to branch on, `reason`, words for people that end a sentence as `inspectAppFile`'s do, and the file's `manifest` where it read. |
+
+| `why` | |
+| --- | --- |
+| `not-app-file` | It isn't an app file this SDK reads. |
+| `api` | It's built for an app API this SDK doesn't run. |
+| `signature` | Its signature doesn't hold: the file changed since it was signed. |
+| `untrusted` | The site's trust refuses it, or there's no Finder to ask. |
+| `built-in` | An application in `apps` has its id. |
+| `storage` | Nothing keeps files: the Finder's storage is `null`, or doesn't answer. |
+| `cancelled` | The visitor said no at the trust's question. |
+| `kind` | It registers a kind another application registers, which `reason` names. |
+| `code` | Its code didn't load, its factory gave no application, or its `init` threw. |
+
+A fresh install that fails changes nothing: no file, no icon. The Finder's own door says why in its `install-refused` alert, a Cancel aside.
+
+### Updating
+
+A file whose application is already on the desktop, its file kept or icons alone, answers `present` and changes nothing until the caller says `replace`. A dropped or pasted one asks first in the Finder's `replace-application` alert, signed or not. Replacing keeps the icons, their places and the session's windows, and goes forward or back to whatever file it's given: choosing a version is the caller's.
+
+- A loaded application keeps its code running, and the new file runs from the next load: its entry in what's installed says `pending`.
+- One that didn't load loads at once, so its icon opens this session, and the windows it had open at the last visit reopen where they were.
+- Icons with no file, an application's from before it was installed, take the file, and the application loads the same way.
+
+### Uninstalling
+
+An application is installed while an icon names it. `uninstall(id)`, on the shell and on `ctx`, removes every icon of it at once, wherever it is, the Trash included, and its file. It asks nothing, since the caller asks first, and resolves `{ status: 'uninstalled', app }`, or `{ status: 'refused', why, reason }` with `why` `'not-installed'` or `'built-in'`. Empty Trash uninstalls an application whose last icon it removes, and so does anything else that leaves the catalog with no icon of it, a restore that replaces the catalog say.
+
+Either way, a running application comes down as `dispose()` takes it down: its windows close, its menus and kinds go, and what its `init` set up comes down through its own `onDispose`. Its documents stay (§ Documents nothing opens), and an alias of one of its icons stays, as an alias whose original is gone.
+
+### What's installed
+
+`installed()`, on the shell and on `ctx`, lists every application on the desktop, built in first, in `apps` order, then the installed ones, in the order they were installed. `onInstalled(fn)` calls `fn(installed())` each time any of it changes; on `ctx` it is torn down with the application, and on the shell it returns its unsubscribe. `appFile(id)` resolves an installed application's file, byte for byte, as a `File` named `<Name>.png`, or `null` for one built in or not installed.
+
+| `InstalledApp` | |
+| --- | --- |
+| `id`, `name` | Its id, and its manifest's or definition's name. |
+| `source` | `'built-in'`, from `apps`, or `'installed'`. |
+| `manifest` | Its app file's manifest: an installed one's, and a built-in's that came from `?app`. `null` for any other. |
+| `standing`, `key` | An installed one's standing with the site's trust at its last check, and the public key that signed it (§ Trust). `null` for one built in. |
+| `loaded` | Whether it loaded and runs. |
+| `why`, `reason` | Why it didn't load: `'not-app-file'`, `'api'`, `'signature'`, `'untrusted'`, `'kind'` or `'code'`, and the words for people. `null` while it loaded, or hasn't yet. |
+| `pending` | A newer file than the code running is kept, and runs from the next load. |
+| `bytes` | An installed one's file's size, or `null`. |
+
+`ctx.ready`, as `shell.ready`, settles once the boot is done, so an application can act once every other has loaded or been skipped. An application installed after the boot finds it settled.
+
+### The boot
+
+The boot reads the catalog and runs the seed, which can install (§ Defaults that install), then loads every installed application, then reopens the session, so an installed application's windows come back as a built-in's do. `ready` settles after them.
+
+- One that doesn't load is skipped, and the rest boot: a file that no longer reads, an `api` this SDK doesn't run, a signature that no longer holds, a trust that no longer takes it, a kind another application has, or code that throws as it loads or in `init`. Its icon stays, drawn from its manifest, opening it says why, and what's installed keeps why.
+- Its windows stay in the saved session as they were, the open ones still marked open through every write, so they reopen when it loads.
+- A kept file no icon names is dropped, not loaded: its icon's write never came, or a restore replaced the catalog.
+- A kept file whose id an application in `apps` has is left alone, unlisted, and loads again once the site stops building that one in.
+
+An `init` that throws, or a reopen whose `open` rejects, takes down that application alone, built in or installed. The console names it and its error.
+
+### Trust
+
+A loaded application runs with the page's whole reach, so a site says whose files it takes:
+
+```ts
+// The site's public key, as generateSigningKeys() gave it: 44 characters of base64.
+const SITE_KEY = 'iPLmyPyGUzpnlN2fCzsmlgp+TYWKFPX8yEivJxKcsng='
+
+createShell(desktop, {
+  apps,
+  trust: { keys: [SITE_KEY], otherwise: 'ask' },
+})
+```
+
+| `trust` | |
+| --- | --- |
+| `keys` | The Ed25519 public keys the site holds, base64, as `generateSigningKeys()` gives them ([APP-FILES.md § Signing](./APP-FILES.md#signing)). Any number, or none. One that isn't a key stops `createShell`. |
+| `otherwise` | What a file none of them signed gets, unsigned or signed by another key: `'install'`, `'refuse'`, or `'ask'`, the default. |
+
+A file's standing is `trusted`, signed by a key the site holds; `untrusted`, signed by another; `unsigned`; or `broken`, a signature that doesn't hold. A trusted file installs without asking. A broken one is refused whatever the trust. Any other gets `otherwise`, and `'ask'` raises the Finder's `untrusted-application` alert, which a site answers with its own through `alertWith`; with no Finder to ask, it's refused. Without `trust`, any app file installs, so another desktop on the shell can run open.
+
+A file is checked at every load, not only at install: one changed in storage loses its standing, and the boot skips it. The trust's question can't be asked at a boot, so a file the visitor said to install keeps that answer for its standing and key, and loads while the trust still asks; one the trust now refuses is skipped. The standing is in install's answer and in what's installed.
+
+### The index
+
+`index` on `createShell` is the URL of the site's index of app files, and every application reads it as `ctx.index`, `null` when the site gives none. A store in an app file then holds no URL of its own. Set it from a build constant, never from the address: a link that pointed it elsewhere would offer anyone's code as the site's.
+
+### Documents nothing opens
+
+A document stays whether or not an application opens it. One whose kind no application registers, its application uninstalled say, is listed where it was, drawn with the Finder's `document` art, and moves, renames and goes to the Trash as any item does. Opening it raises the Finder's `no-application` alert. Registering its kind, at the start or at an install, gives it its icon back.
+
+Its kind's hooks went with its application, so meanwhile Copy copies its record and its `data`, and Empty Trash removes its record and weighs it as nothing. A payload its application kept in a store of its own is neither copied nor dropped.
+
+### Defaults that install
+
+A seed function gets the install door beside the catalog, so a new desktop's applications are installed files from the first. `appFiles()`' `?app-file` import gives a file's URL, the file served byte for byte, and its manifest ([APP-FILES.md § A site's build](./APP-FILES.md#a-sites-build)):
+
+```ts
+import meteors from '../apps/Meteors.png?app-file'
+
+finder({
+  storage,
+  art,
+  seed: async (catalog, install) => {
+    await install(await (await fetch(meteors)).arrayBuffer())
+  },
+})
+```
+
+A site's own command installs through `ctx.install`, a Restore Default Files say, and the site through `shell.install` once `ready` has settled, to give the icons of a desktop from before their files with `replace: true`.
+
+### Where installs are kept
+
+An installed application's file is a record of the Finder's own storage, beside the catalog's items, one per application however many icons it has: `#app:<id>`, its file base64 in its `data`. Wherever the storage keeps items it keeps installs: `memoryStorage()` forgets them on reload, as it forgets everything else, `indexedDbStorage()` keeps them, and a site's own storage gets them through the same three calls. The file is written before the icon, so a crash between the two leaves a file no icon names, which the next boot drops.
+
+### Loading the code
+
+An installed application's code is one ES module that imports `vintage-frames`, `system-online-sdk` and `system-online-sdk/pure` by name, and reaches the page's own copies of them: one registry of elements, one shell, `instanceof VfWindow` true across both, in a site's production build and under its dev server alike. The shell makes a `blob:` module of each from the namespace it holds, and rewrites the code's imports, the declarations it opens with, to point at them. The code itself loads as a `blob:` module too.
+
+A page asks nothing of its HTML for it. A page with a Content-Security-Policy allows `blob:` in `script-src`.
+
 ## Saved state
 
 ```ts
@@ -550,7 +712,7 @@ createShell(desktop, { apps, state: localStorageState('my-site', { extra: { gree
 - the desktop pattern,
 - the site's own keys: `state.get('greet')`, `state.set('greet', false)`.
 
-The boot reopens the windows that were open, deepest first, then activates the one that was active. A palette's box is kept but never reopened as a window. Writes wait a moment after a change, and nothing is written until the boot has reopened the session. Hiding or leaving the page writes at once. `?fresh=1` in the address neither reads nor writes. With `state: null` nothing is saved.
+The boot reopens the windows that were open, deepest first, then activates the one that was active. A palette's box is kept but never reopened as a window. A window of an application that isn't running, one the boot skipped say, stays marked open through every write, and reopens once the application loads. Writes wait a moment after a change, and nothing is written until the boot has reopened the session. Hiding or leaving the page writes at once. `?fresh=1` in the address neither reads nor writes. With `state: null` nothing is saved.
 
 The catalog's storage and the saved session are separate: a site can keep either, or both.
 
@@ -567,10 +729,10 @@ Each module also works alone, on a page built from the elements ([vintage-frames
 | `localStorageState`, `readSession`, `mergeSession` | The saved session. |
 | `installedFamiliesOf`, `FontFamily`, `FontStrike` | The system's fonts' rule and types, pure (§ Fonts). |
 | `startClock` | The clock. |
-| `readAppFile`, `inspectAppFile`, `satisfies`, `compareVersions`, `appRuns`, `APP_FILE_FORMAT`, `APP_API`, `APP_API_OLDEST`, `BOX_SCALE` | An app file's manifest and code, or why it isn't one; a version checked against a range, and versions put in order; whether this SDK runs an application, and the app API levels it runs; the scale every box is drawn at ([APP-FILES.md](./APP-FILES.md)). |
+| `readAppFile`, `inspectAppFile`, `checkSignature`, `judgeSignature`, `satisfies`, `compareVersions`, `appRuns`, `APP_FILE_FORMAT`, `APP_API`, `APP_API_OLDEST`, `BOX_SCALE` | An app file's manifest and code, or why it isn't one; its signature, and what a site's trust says of it; a version checked against a range, and versions put in order; whether this SDK runs an application, and the app API levels it runs; the scale every box is drawn at ([APP-FILES.md](./APP-FILES.md)). |
 | `VERSION` | The SDK's version. |
 
-`system-online-sdk/pure` exports the catalog, the system's fonts' rule and types, the geometry, the saved session, the app file reader and `VERSION` alone. They import nothing of vintage-frames and touch no DOM when imported, so a site's own pure modules, and their tests under Node, import them from there:
+`system-online-sdk/pure` exports the catalog, the system's fonts' rule and types, the geometry, the saved session, the app file reader with its signature check and `VERSION` alone. They import nothing of vintage-frames and touch no DOM when imported, so a site's own pure modules, and their tests under Node, import them from there:
 
 ```ts
 import { createCatalog, memoryStorage, childrenOf, isPin, cascadedBox } from 'system-online-sdk/pure'
@@ -580,4 +742,4 @@ import { createCatalog, memoryStorage, childrenOf, isPin, cascadedBox } from 'sy
 
 ## The reference page
 
-This repo's `index.html` runs the shell with the Finder and Note Pad, a small application with documents of its own kind, an Info palette, a close that asks about unsaved changes in an alert of its own, a `claim` that makes a note of a dropped text file, and a Font menu of the installed families (`demo/main.ts`). Its System Folder sits on the desktop. Its Apple Menu Items holds Note Pad, and its Fonts a suitcase of each of the two families the page serves its system, vintage-frames' own faces (`demo/fonts.ts`). No application there opens a suitcase, so opening one raises the Finder's alert. `?save=1` keeps the catalog and the session across reloads, `?cleanup=1` turns on Clean Up after a resize, and `?open=Projects&open=Archive` opens those items at load. `verify:front`, `verify:windows`, `verify:finder` and `verify:fonts` drive it, the last fixtures of its own too, and `verify:unit` tests the pure modules and the build entry under Node ([DEVELOPING.md](./DEVELOPING.md)).
+This repo's `index.html` runs the shell with the Finder and Note Pad, a small application with documents of its own kind, an Info palette, a close that asks about unsaved changes in an alert of its own, a `claim` that makes a note of a dropped text file, and a Font menu of the installed families (`demo/main.ts`). Its System Folder sits on the desktop. Its Apple Menu Items holds Note Pad, and its Fonts a suitcase of each of the two families the page serves its system, vintage-frames' own faces (`demo/fonts.ts`). No application there opens a suitcase, so opening one raises the Finder's alert. It sets no trust, so an app file dropped on it installs. `?save=1` keeps the catalog, the installs and the session across reloads, `?cleanup=1` turns on Clean Up after a resize, and `?open=Projects&open=Archive` opens those items at load. `verify:front`, `verify:windows`, `verify:finder`, `verify:fonts` and `verify:installs` drive it, the last two fixtures of their own too, and `verify:unit` tests the pure modules and the build entry under Node ([DEVELOPING.md](./DEVELOPING.md)).

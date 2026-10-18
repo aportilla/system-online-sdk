@@ -62,3 +62,17 @@ test('merge: a known window keeps its box and loses its depth; the snapshot’s 
   assert.deepEqual(session.extra, { greet: true })
   assert.deepEqual(readSession(JSON.parse(JSON.stringify(session))), session, 'what it writes reads back')
 })
+
+test('merge: a window of an application that waits to load keeps its depth, and stays open through write after write', () => {
+  const known = { game: { app: 'meteors', pin, z: 2 }, note: { app: 'note-pad', pin, z: 1 }, shut: { app: 'meteors', pin } }
+  const snapshot = { windows: { folder: { app: 'finder', pin, z: 0 } }, active: 'folder', pattern: null, waiting: ['meteors'] }
+  const once = mergeSession(known, snapshot, {})
+  assert.deepEqual(once.windows.game, { app: 'meteors', pin, z: 2 })
+  assert.deepEqual(once.windows.note, { app: 'note-pad', pin }, 'a running application’s window that isn’t open loses it')
+  assert.deepEqual(once.windows.shut, { app: 'meteors', pin }, 'a box alone stays a box alone')
+  const twice = mergeSession(once.windows, snapshot, {})
+  assert.deepEqual(openWindowsOf(twice).map((w) => w.item), ['folder', 'game'])
+  // Once it runs, its windows are the snapshot's to say.
+  const loaded = mergeSession(twice.windows, { ...snapshot, waiting: [] }, {})
+  assert.deepEqual(loaded.windows.game, { app: 'meteors', pin })
+})

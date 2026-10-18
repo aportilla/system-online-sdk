@@ -17,16 +17,20 @@ import {
   APP_FILE_FORMAT,
   VERSION,
   appRuns,
+  checkSignature,
   compareVersions,
   inspectAppFile,
+  judgeSignature,
   readAppFile,
   satisfies,
 } from '../scripts/.tmp/unit/pure.js'
-import { appFile, packApp, writeAppFile } from '../scripts/.tmp/unit/build/index.js'
+import { appFile, generateSigningKeys, packApp, signAppFile, writeAppFile } from '../scripts/.tmp/unit/build/index.js'
 import { encodePng } from '../scripts/.tmp/unit/build/png.js'
+import { carriesApp, leadingImports } from '../scripts/.tmp/unit/app-file.js'
 
 const MANIFEST_KEYWORD = 'system-online.app'
 const CODE_KEYWORD = 'system-online.code'
+const SIGNATURE_KEYWORD = 'system-online.signature'
 
 /** A PNG's chunks, each with where it sits in the file and its bytes there. */
 function chunksOf(bytes) {
@@ -296,4 +300,174 @@ test('compareVersions: semver\'s order, build metadata ignored, and anything tha
 test('VERSION is package.json\'s version', () => {
   const pkg = JSON.parse(readFileSync(new URL('../package.json', import.meta.url), 'utf8'))
   assert.equal(VERSION, pkg.version)
+})
+
+/* ── Signatures ─────────────────────────────────────────────────────────── */
+
+const KEYS = await generateSigningKeys()
+const OTHER = await generateSigningKeys()
+
+/** `file` with one chunk's data swapped by `edit`, its CRC made good, so the PNG stays whole: a forger's change. */
+function forged(file, pick, edit) {
+  const chunks = chunksOf(file)
+  const at = chunks.findIndex(pick)
+  const { raw, type } = chunks[at]
+  return assemble([...chunks.slice(0, at), chunk(type, edit(Buffer.from(raw.subarray(8, raw.length - 4)))), ...chunks.slice(at + 1)])
+}
+
+test('a key pair is base64: the public key its 32 bytes, the private key its PKCS #8 form', () => {
+  assert.equal(Buffer.from(KEYS.publicKey, 'base64').length, 32)
+  assert.equal(Buffer.from(KEYS.privateKey, 'base64').length, 48)
+  assert.notEqual(KEYS.publicKey, OTHER.publicKey)
+})
+
+test('checking a signature: unsigned, or signed and by which key; the reader reads a signed file as any other', async () => {
+  const file = await writeAppFile(await box(), MANIFEST, CODE)
+  assert.deepEqual(await checkSignature(file), { status: 'unsigned' })
+  const signed = await signAppFile(file, KEYS.privateKey)
+  assert.deepEqual(await checkSignature(signed), { status: 'signed', key: KEYS.publicKey })
+  assert.deepEqual(await readAppFile(signed), { manifest: MANIFEST, code: CODE })
+  // The box keeps its chunks; the signature goes in before IEND.
+  assert.deepEqual(chunksOf(signed).slice(-4).map((c) => c.keyword ?? c.type), [MANIFEST_KEYWORD, CODE_KEYWORD, SIGNATURE_KEYWORD, 'IEND'])
+  const { raw } = chunksOf(signed).find((c) => c.keyword === SIGNATURE_KEYWORD)
+  const fields = JSON.parse(raw.toString('utf8', 8 + SIGNATURE_KEYWORD.length + 5, raw.length - 4))
+  assert.deepEqual(Object.keys(fields), ['algorithm', 'key', 'signature'])
+  assert.equal(fields.algorithm, 'Ed25519')
+})
+
+test('a signature covers every byte but its own chunk: one byte of the manifest, the code or the picture changed breaks it', async () => {
+  const signed = await signAppFile(await writeAppFile(await box(), MANIFEST, CODE), KEYS.privateKey)
+  const author = forged(signed, (c) => c.keyword === MANIFEST_KEYWORD, (data) => {
+    const at = data.indexOf('Adam')
+    data[at] = 'E'.charCodeAt(0)
+    return data
+  })
+  assert.equal((await readAppFile(author)).manifest.author, 'Edam Portilla', 'a whole app file, but not the one signed')
+  const code = forged(signed, (c) => c.keyword === CODE_KEYWORD, () => itxt(CODE_KEYWORD, CODE.replace('meteors', 'meteorz'), true).raw.subarray(8, -4))
+  assert.equal((await readAppFile(code)).code, CODE.replace('meteors', 'meteorz'))
+  const picture = forged(signed, (c) => c.type === 'IDAT', (data) => {
+    data[2] ^= 1
+    return data
+  })
+  const tail = new Uint8Array([...signed, 0])
+  for (const [file, what] of [[author, 'the manifest'], [code, 'the code'], [picture, 'the picture'], [tail, 'a byte past IEND']]) {
+    assert.deepEqual(
+      await checkSignature(file),
+      { status: 'broken', key: KEYS.publicKey, reason: 'it was changed after it was signed' },
+      what
+    )
+  }
+})
+
+test('two signatures, one that doesn’t read and another algorithm are broken', async () => {
+  const signed = await signAppFile(await writeAppFile(await box(), MANIFEST, CODE), KEYS.privateKey)
+  const twice = assemble(chunksOf(signed).flatMap((c) => (c.keyword === SIGNATURE_KEYWORD ? [c, c] : [c])))
+  assert.deepEqual(await checkSignature(twice), { status: 'broken', key: null, reason: 'it has two signatures' })
+  const swap = (fields) => forged(signed, (c) => c.keyword === SIGNATURE_KEYWORD, () => itxt(SIGNATURE_KEYWORD, fields, false).raw.subarray(8, -4))
+  assert.equal((await checkSignature(swap('not json'))).reason, 'its signature does not read')
+  assert.equal((await checkSignature(swap(JSON.stringify({ algorithm: 'Ed25519', key: KEYS.publicKey, signature: 'AAAA' })))).reason, 'its signature does not read')
+  assert.deepEqual(await checkSignature(swap(JSON.stringify({ algorithm: 'RSA', key: KEYS.publicKey, signature: 'AAAA' }))), {
+    status: 'broken',
+    key: KEYS.publicKey,
+    reason: 'its signature is "RSA", and this SDK checks Ed25519',
+  })
+  assert.equal((await checkSignature(new Uint8Array([1, 2, 3]))).status, 'broken')
+})
+
+test('signing again replaces the signature; a rewritten file carries none; the key can be PEM', async () => {
+  const file = await writeAppFile(await box(), MANIFEST, CODE)
+  const once = await signAppFile(file, KEYS.privateKey)
+  const pem = `-----BEGIN PRIVATE KEY-----\n${KEYS.privateKey}\n-----END PRIVATE KEY-----\n`
+  const again = await signAppFile(once, pem)
+  assert.equal(chunksOf(again).filter((c) => c.keyword === SIGNATURE_KEYWORD).length, 1)
+  assert.deepEqual(await checkSignature(again), { status: 'signed', key: KEYS.publicKey })
+  const resigned = await signAppFile(once, OTHER.privateKey)
+  assert.deepEqual(await checkSignature(resigned), { status: 'signed', key: OTHER.publicKey })
+  const rewritten = await writeAppFile(once, { ...MANIFEST, version: '0.2.0' }, CODE)
+  assert.deepEqual(await checkSignature(rewritten), { status: 'unsigned' }, 'writeAppFile drops it with the app chunks')
+  await assert.rejects(signAppFile(await box(), KEYS.privateKey), /not an app file: it carries no application/)
+  await assert.rejects(signAppFile(file, KEYS.publicKey), /not an Ed25519 private key/)
+  await assert.rejects(signAppFile(file, 'banana'), /not an Ed25519 private key/)
+})
+
+test('the trust’s answer for each standing and setting: a held key installs; a broken signature is refused whatever', async () => {
+  const file = await writeAppFile(await box(), MANIFEST, CODE)
+  const unsigned = await checkSignature(file)
+  const signed = await checkSignature(await signAppFile(file, KEYS.privateKey))
+  const broken = { status: 'broken', key: KEYS.publicKey, reason: 'it was changed after it was signed' }
+  const answers = (trust) => [signed, unsigned, broken].map((check) => {
+    const { standing, answer } = judgeSignature(check, trust)
+    return `${standing}:${answer}`
+  })
+  assert.deepEqual(answers(null), ['untrusted:install', 'unsigned:install', 'broken:refuse'], 'no trust: any file installs')
+  assert.deepEqual(answers({ keys: [KEYS.publicKey] }), ['trusted:install', 'unsigned:ask', 'broken:refuse'], 'asked about by default')
+  assert.deepEqual(answers({ keys: [OTHER.publicKey], otherwise: 'refuse' }), ['untrusted:refuse', 'unsigned:refuse', 'broken:refuse'])
+  assert.deepEqual(answers({ keys: [], otherwise: 'install' }), ['untrusted:install', 'unsigned:install', 'broken:refuse'])
+  assert.deepEqual(answers({ keys: [OTHER.publicKey, KEYS.publicKey], otherwise: 'ask' }), ['trusted:install', 'unsigned:ask', 'broken:refuse'])
+  // A key written another way is the same key.
+  const urlSafe = KEYS.publicKey.replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '')
+  assert.deepEqual(judgeSignature(signed, { keys: [urlSafe] }), { standing: 'trusted', key: KEYS.publicKey, answer: 'install' })
+})
+
+test('carriesApp: a PNG with an app file’s chunks, whole or not; any other PNG or file isn’t one', async () => {
+  const file = await writeAppFile(await box(), MANIFEST, CODE)
+  assert.equal(carriesApp(file), true)
+  assert.equal(carriesApp(file.subarray(0, file.length - 30)), true, 'cut short')
+  assert.equal(carriesApp(await handMade({ ...MANIFEST, format: 1 }, ['vintage-frames.app', 'vintage-frames.code'])), true, 'format 1')
+  assert.equal(carriesApp(await box()), false)
+  assert.equal(carriesApp(new TextEncoder().encode('iTXtsystem-online.app')), false, 'not a PNG')
+})
+
+/* ── The code's imports ─────────────────────────────────────────────────── */
+
+/** The specifiers leadingImports finds in `code`, each as the code quotes it. */
+const heads = (code) => leadingImports(code)?.map(({ specifier, start, end }) => `${specifier}@${code.slice(start, end)}`) ?? null
+
+test('leadingImports: every declaration a bundle opens with, each name where its quotes sit', () => {
+  const code = [
+    '#!/usr/bin/env node',
+    '"use strict";',
+    '/* a banner */ // and a line',
+    'import { a as b, "c-d" as e } from "vintage-frames";',
+    "import * as kit from 'vintage-frames'",
+    'import f, { g } from "system-online-sdk";',
+    'import "system-online-sdk/pure";',
+    'import data from "./data.json" with { type: "json" };',
+    'export * from "system-online-sdk/pure";',
+    'export * as "name" from "x";',
+    'export { h, i as j } from "y";',
+    '//#region src/index.ts',
+    'const k = "import { z } from \\"nope\\"";',
+    'import { late } from "late";',
+  ].join('\n')
+  assert.deepEqual(heads(code), [
+    'vintage-frames@"vintage-frames"',
+    "vintage-frames@'vintage-frames'",
+    'system-online-sdk@"system-online-sdk"',
+    'system-online-sdk/pure@"system-online-sdk/pure"',
+    './data.json@"./data.json"',
+    'system-online-sdk/pure@"system-online-sdk/pure"',
+    'x@"x"',
+    'y@"y"',
+  ])
+})
+
+test('leadingImports: minified, and stopping at the code, a local export, import() and import.meta', () => {
+  assert.deepEqual(heads('import{a as b}from"vintage-frames";import*as c from"system-online-sdk";export{d};import("e")'), [
+    'vintage-frames@"vintage-frames"',
+    'system-online-sdk@"system-online-sdk"',
+  ])
+  assert.deepEqual(heads('import("vintage-frames").then(() => {})'), [])
+  assert.deepEqual(heads('import.meta.url; import x from "y"'), [])
+  assert.deepEqual(heads('export default function () {}'), [])
+  assert.deepEqual(heads(''), [])
+  assert.equal(heads('import { a } from "unterminated'), null)
+  assert.equal(heads('import { a from "x"'), null)
+  assert.equal(heads('/* open'), null)
+})
+
+test('leadingImports reads the head of a packed app file’s code, as an install does', async () => {
+  const code = 'import { centeredBox as e, defineApp as t } from "system-online-sdk";\nimport { VF_BODY_FAMILY as n } from "vintage-frames";\n//#region src/index.ts\nexport { t as default };\n'
+  const { code: read } = await readAppFile(await packApp({ manifest: { id: 'x', name: 'X', version: '1.0.0', requires: '^0.2.0', author: 'A' }, icon: ICON, code }))
+  assert.deepEqual(leadingImports(read).map((i) => i.specifier), ['system-online-sdk', 'vintage-frames'])
 })

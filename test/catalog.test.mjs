@@ -43,8 +43,7 @@ const names = (items) => items.map((i) => i.name)
 /**
  * A catalog over a memory storage with a stepping clock and counting ids.
  * `text` and `font` are registered kinds with sizes and payload hooks that
- * log what they are asked, and aliases are listed, as the shell registers
- * them; `zapf` is a kind no one registers.
+ * log what they are asked; `zapf` is a kind no one registers.
  */
 async function library({ volumes = { trash: 'Trash', disk: 'Macintosh HD' }, system, storage = memoryStorage() } = {}) {
   const log = []
@@ -54,7 +53,6 @@ async function library({ volumes = { trash: 'Trash', disk: 'Macintosh HD' }, sys
     storage,
     volumes,
     system,
-    listed: (kind) => kind === 'text' || kind === 'font' || kind === ALIAS_KIND,
     hooks: (kind) =>
       kind === 'text' || kind === 'font'
         ? {
@@ -171,14 +169,63 @@ test('the Trash: a folder files into it whole; Empty Trash removes its subtree a
   assert.equal(st.items.some((i) => i.id === TRASH), true, 'the Trash stands, empty')
 })
 
-test('kinds: one no application registers is left out of the listing and kept in storage', async () => {
-  const { catalog, storage } = await library()
-  const z = await catalog.create({ name: 'Zapf', kind: 'zapf' })
-  const t = await catalog.create({ name: 'Note', kind: 'text' })
-  assert.deepEqual(names(childrenOf(catalog.get(), null)).slice(2), ['Note'])
-  assert.ok(storage.records.has(z.id) && storage.records.has(t.id))
-  // …and comes back with the rest in a dump.
-  assert.ok(catalog.dump().items.some((i) => i.id === z.id))
+test('kinds: a document no application registers is listed where it is, moves, renames, copies and goes to the Trash', async () => {
+  const { catalog, storage, log } = await library()
+  const box = await catalog.create({ name: 'Box' })
+  const z = await catalog.create({ name: 'Zapf', kind: 'zapf', data: { glyphs: 3 } })
+  await catalog.create({ name: 'Note', kind: 'text' })
+  assert.deepEqual(names(childrenOf(catalog.get(), null)).slice(2), ['Box', 'Zapf', 'Note'])
+  assert.ok(storage.records.has(z.id))
+  assert.ok(catalog.dump().items.some((i) => i.id === z.id), 'and comes back with the rest in a dump')
+  assert.equal(await catalog.rename(z.id, 'Dingbats'), true)
+  assert.deepEqual(await catalog.move([z.id], box.id), [z.id])
+  const [copy] = await catalog.copy([z.id], null)
+  assert.deepEqual([copy.name, copy.kind, copy.data], ['Dingbats', 'zapf', { glyphs: 3 }], 'a copy carries its data')
+  assert.deepEqual(await catalog.move([z.id], TRASH), [z.id])
+  assert.equal(catalog.trashSize(), 0, 'it weighs nothing: no kind says')
+  assert.deepEqual((await catalog.emptyTrash()).map((i) => i.id), [z.id])
+  assert.deepEqual(log, [], 'no kind’s hooks ran for it')
+})
+
+test('the shell’s own records, under ids that start with #, are never listed, dumped, imported or cleared', async () => {
+  const storage = memoryStorage()
+  const file = { id: '#app:meteors', name: 'Meteors', kind: '#app', parent: null, createdAt: 1, modifiedAt: 1, data: { file: 'iVBO' } }
+  await storage.put(file)
+  const { catalog } = await library({ storage })
+  await catalog.create({ name: 'Note', kind: 'text' })
+  assert.ok(!catalog.get().items.some((i) => i.id.startsWith('#')))
+  assert.ok(!catalog.dump().items.some((i) => i.id.startsWith('#')))
+  const stored = await catalog.import({ items: [{ ...file, id: '#app:other' }, { id: 'n', name: 'N', kind: 'text', parent: null, createdAt: 2, modifiedAt: 2 }] })
+  assert.deepEqual([...stored.keys()], ['n'], 'an archive’s # record is not an item')
+  await catalog.clear()
+  assert.deepEqual([...storage.records.keys()], ['#app:meteors'])
+  assert.deepEqual(storage.records.get('#app:meteors'), file, 'a clear leaves it as it was')
+})
+
+test('a record of a volume’s kind under any other id is no item', async () => {
+  const storage = memoryStorage([{ id: 'stray', name: 'Stray', kind: TRASH, parent: null, createdAt: 1, modifiedAt: 1 }])
+  const { catalog } = await library({ storage })
+  assert.deepEqual(names(childrenOf(catalog.get(), null)), ['Macintosh HD', 'Trash'])
+})
+
+test('remove: items go at once, wherever they are, the Trash included, a folder with what it holds; never a kept container', async () => {
+  const { catalog, storage, log } = await library()
+  const box = await catalog.create({ name: 'Box' })
+  const inside = await catalog.create({ name: 'Inside', kind: 'text', parent: box.id })
+  const trashed = await catalog.create({ name: 'Trashed', kind: 'font', parent: TRASH })
+  assert.equal(trashed, null, 'nothing is made in the Trash')
+  const later = await catalog.create({ name: 'Later', kind: 'font' })
+  await catalog.move([later.id], TRASH)
+  const loose = await catalog.create({ name: 'Loose', kind: 'zapf' })
+  const heard = []
+  catalog.subscribe(() => heard.push('changed'))
+  const gone = await catalog.remove([box.id, later.id, loose.id, TRASH, DISK, 'nothing'])
+  assert.deepEqual(names(gone), ['Box', 'Inside', 'Later', 'Loose'])
+  assert.deepEqual(log.filter((l) => l.startsWith('remove')).sort(), [`remove ${inside.id}`, `remove ${later.id}`].sort())
+  assert.ok(![box.id, inside.id, later.id, loose.id].some((id) => storage.records.has(id)))
+  assert.deepEqual(names(childrenOf(catalog.get(), null)), ['Macintosh HD', 'Trash'])
+  assert.deepEqual(heard, ['changed'], 'announced once')
+  assert.deepEqual(await catalog.remove([]), [])
 })
 
 test('the app kind: its data names the application; appIdOf reads it, null without one', async () => {
