@@ -4,8 +4,9 @@
  * Menu Items holds Note Pad and whose Fonts holds a suitcase of each family
  * the page gives its system (demo/fonts.ts). Note Pad is a small application
  * with documents of its own kind, an Info palette shown while it is front, a
- * close that asks about unsaved changes in an alert of its own, a zoom box
- * the window manager runs, and a Font menu of the installed families. No
+ * close that asks about unsaved changes in an alert of its own, a hook that
+ * makes leaving the page ask first while a note is unsaved, a zoom box the
+ * window manager runs, and a Font menu of the installed families. No
  * application here opens a suitcase, so opening one says so.
  *
  * `?save=1` keeps the catalog in IndexedDB and the session in localStorage;
@@ -153,6 +154,14 @@ function notePad(): AppDefinition<NotePadActions> {
         if (answer === 'save') await save(win)
         void windows.close(win)
       }
+
+      // Before it quits: while a note is unsaved, leaving the page asks
+      // first, and its offer to save is its Quit, each edited note's close
+      // asking in turn.
+      ctx.beforeQuit({
+        unsaved: () => windows.windowsOf(NOTE_PAD).some((w) => unsaved.has(w)),
+        save: () => windows.closeAll(NOTE_PAD),
+      })
 
       /** A document's zoomed box: the window area's full height, at its own left and width. */
       const zoom = (a: Box, box: Box) => ({ left: box.left, top: a.top, width: box.width, height: a.height })

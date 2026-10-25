@@ -22,6 +22,33 @@
  *    an application that isn't here, and a PNG that isn't an app file.
  *  - COPY: Copy puts the file on the clipboard, and Paste on another desktop
  *    installs it, byte for byte.
+ *  - RESTART: restart() runs a running application's pending file in place
+ *    with no saved session: its windows back at their boxes and depths among
+ *    every window, the front application and its menus as they were, behind
+ *    another's window, in front, or with none active; again, fresh, with
+ *    nothing pending.
+ *  - ROLLBACK: a new file whose init throws, or whose open rejects as the
+ *    windows reopen, is refused, the old version running again with its
+ *    windows back, still pending.
+ *  - KIND: a pending file with a kind another application has is refused
+ *    before anything closes.
+ *  - ITSELF, ART: an application restarts itself through its own ctx; its
+ *    document's icon never shows the Finder's document art on the way, and
+ *    takes the new code's art.
+ *  - REFUSED: restart() refuses one built in, one not installed, and one the
+ *    boot skipped.
+ *  - BEFORE QUIT: an application's offer to save is asked only while it holds
+ *    something unsaved, once, and its answer stands: going on restarts it,
+ *    over a window's own close that would stay; staying cancels; throwing
+ *    refuses.
+ *  - CANCELLED: without a hook, its windows' own closes are asked, and one
+ *    that stays open cancels.
+ *  - SAVED: an untitled window its own close saves comes back as the
+ *    document it became.
+ *  - LEAVING: leaving the page asks first while an application holds
+ *    something unsaved, and not once it's saved or uninstalled.
+ *  - SESSION: a page left mid-restart, one window closed and another's
+ *    question open, reopens both on the kept file.
  *  - TRUST (fixtures): a held key installs without asking, an unsigned file
  *    or another key's is asked about, a changed byte is refused, `refuse`
  *    refuses and no trust installs; every boot checks again.
@@ -52,41 +79,79 @@ const browser = await launch()
 
 /**
  * An application's code as appFile() builds it: static imports of the three
- * entries at its head, then its factory. It registers `<id>-doc`, opens a
- * window of its own and one for each of its documents, puts its context and
- * what it imported on `window.probes`, and throws in its init while
- * localStorage holds `explode:<id>`.
+ * entries at its head, then its factory. It registers `<id>-doc`, drawn in
+ * `art`, opens a window of its own and one for each of its documents, puts
+ * its context, its version and what it imported on `window.probes`, and
+ * throws in its init while localStorage holds `explode:<id>`.
+ *
+ * A version can break: its init throws, or its `open` of its own window, a
+ * document's opening first (`breaks`). Its
+ * windows' close can keep them open, a Cancel; hold its question until the
+ * check answers through `window.probeHeld`; or save an untitled one, a
+ * `draft()`, as a document first (`close`). With `quits` it asks before it
+ * quits: whether it holds something unsaved, and whether its offer to save
+ * goes on, stays or throws, are `window.probeQuit[id]`'s, which counts the
+ * offers.
  */
-const appCode = ({ id, name, kind = `${id}-doc` }) => `
+const appCode = ({ id, name, version = '1.0.0', kind = `${id}-doc`, art = '/demo/icons/app-icon.png', breaks = null, close = null, quits = false }) => `
 import { defineApp } from "system-online-sdk";
 import { VfWindow } from "vintage-frames";
 import { APP_KIND } from "system-online-sdk/pure";
 const ID = ${JSON.stringify(id)};
 const NAME = ${JSON.stringify(name)};
+const KIND = ${JSON.stringify(kind)};
+const VERSION = ${JSON.stringify(version)};
+const BREAKS = ${JSON.stringify(breaks)};
+const CLOSE = ${JSON.stringify(close)};
+const QUITS = ${JSON.stringify(quits)};
 export default function factory() {
   let open = () => {};
   return defineApp({
     id: ID,
     name: NAME,
-    kinds: { ${JSON.stringify(kind)}: { art: "/demo/icons/app-icon.png", open: (item, from) => open(item.id, item.name, from) } },
+    kinds: { [KIND]: { art: ${JSON.stringify(art)}, open: (item, from) => open(item.id, item.name, from) } },
     init(ctx) {
       if (localStorage.getItem("explode:" + ID)) throw new Error(NAME + " won't start");
+      if (BREAKS === "init") throw new Error(NAME + " " + VERSION + " breaks as it starts");
       const probes = (window.probes ??= {});
-      probes[ID] = { ctx, VfWindow, defineApp, APP_KIND, disposed: false };
+      const me = (probes[ID] = { ctx, version: VERSION, VfWindow, defineApp, APP_KIND, disposed: false });
+      const close =
+        CLOSE === "keeps" ? () => {}
+        : CLOSE === "holds" ? (win) => new Promise((done) => (window.probeHeld ??= []).push((yes) => { if (yes) ctx.windows.close(win); done(); }))
+        : CLOSE === "saves" ? async (win) => {
+            if (ctx.windows.itemOf(win) == null) ctx.windows.setItem(win, (await ctx.catalog.create({ kind: KIND, name: win.heading })).id);
+            ctx.windows.close(win);
+          }
+        : null;
       open = (item, heading, from) =>
         ctx.windows.open({
           app: ID,
           item,
           from,
+          close,
           create: () => Object.assign(document.createElement("vf-window"), { heading, width: 220, height: 120, closable: true, movable: true }),
         });
-      ctx.onDispose(() => (probes[ID].disposed = true));
+      if (QUITS) {
+        const quit = () => ((window.probeQuit ??= {})[ID] ??= { unsaved: false, save: "goes", asked: 0 });
+        ctx.beforeQuit({
+          unsaved: () => quit().unsaved,
+          async save() {
+            const q = quit();
+            q.asked++;
+            if (q.save === "throws") throw new Error(NAME + " can't save");
+            return q.save === "goes";
+          },
+        });
+      }
+      ctx.onDispose(() => (me.disposed = true));
       return {
         open({ item, from = null } = {}) {
+          if (BREAKS === "open" && (item == null || item === ID)) throw new Error(NAME + " " + VERSION + " can't open its window");
           const doc = item != null && item !== ID ? ctx.catalog?.item(item) : null;
           if (doc) open(doc.id, doc.name, from);
           else if (item == null || item === ID) open(ID, NAME, from);
         },
+        draft: (heading) => open(null, heading, null),
       };
     },
   });
@@ -100,11 +165,11 @@ const ICON = await encodePng({
 })
 
 /** An app file of the application above. */
-const pack = ({ id = 'probe', name = 'Probe', version = '1.0.0', kind } = {}) =>
+const pack = ({ id = 'probe', name = 'Probe', version = '1.0.0', ...code } = {}) =>
   packApp({
     manifest: { id, name, version, requires: '^0.2.0', author: 'Tester', description: `${name}, for the tests.` },
     icon: ICON,
-    code: appCode({ id, name, kind }),
+    code: appCode({ id, name, version, ...code }),
   })
 
 const encoder = new TextEncoder()
@@ -133,6 +198,20 @@ const LOOSE = await pack({ id: 'loose', name: 'Loose' })
 const SQUATTER = await pack({ id: 'squatter', name: 'Squatter', kind: 'note' })
 const IMPOSTOR = await pack({ id: 'note-pad', name: 'Note Pad' })
 const PICTURE = new Uint8Array(readFileSync(new URL('../demo/icons/folder.png', import.meta.url)))
+// Restarts: versions that break, one with Note Pad's kind, one drawn anew,
+// and applications that ask before they quit or whose windows' close asks.
+const BREAKS_INIT = await pack({ version: '1.3.0', breaks: 'init' })
+const BREAKS_OPEN = await pack({ version: '1.4.0', breaks: 'open' })
+const CLASHING = await pack({ version: '1.5.0', kind: 'note' })
+const REDRAWN = await pack({ version: '1.6.0', art: '/demo/icons/trash.png' })
+const QUITTER = await pack({ id: 'quitter', name: 'Quitter', quits: true })
+const QUITTER_NEXT = await pack({ id: 'quitter', name: 'Quitter', version: '1.1.0', quits: true })
+const STUBBORN = await pack({ id: 'stubborn', name: 'Stubborn', quits: true, close: 'keeps' })
+const KEEPER = await pack({ id: 'keeper', name: 'Keeper', close: 'keeps' })
+const KEEPER_NEXT = await pack({ id: 'keeper', name: 'Keeper', version: '1.1.0', close: 'keeps' })
+const HOLDER = await pack({ id: 'holder', name: 'Holder', close: 'holds' })
+const HOLDER_NEXT = await pack({ id: 'holder', name: 'Holder', version: '1.1.0', close: 'holds' })
+const SAVER = await pack({ id: 'saver', name: 'Saver', close: 'saves' })
 
 /* ── In the page ────────────────────────────────────────────────────────── */
 
@@ -158,6 +237,64 @@ const install = (page, bytes, options = {}) =>
     },
     [base64(bytes), options]
   )
+
+/** Restart an application through the shell, and resolve the answer: its status, why, and the app's version. */
+const restart = (page, id) =>
+  page.evaluate(async (i) => {
+    const answer = await window.shell.restart(i)
+    return {
+      status: answer.status,
+      why: answer.why ?? null,
+      reason: answer.reason ?? null,
+      version: answer.app?.manifest?.version ?? null,
+      previous: answer.previous ?? null,
+      loaded: answer.app?.loaded ?? null,
+      pending: answer.app?.pending ?? null,
+    }
+  }, id)
+
+/** The version of an application's code that runs, as it put it on `window.probes`. */
+const running = (page, id) => page.evaluate((i) => window.probes[i]?.version ?? null, id)
+
+/**
+ * Watch the art of the icon labelled `label`: read at every frame, and every
+ * value it holds, painted or not. `artSeen()` stops and resolves both, each
+ * value once, in order.
+ */
+const watchArt = (page, label) =>
+  page.evaluate((l) => {
+    const icon = [...document.querySelectorAll('vf-icon[data-id]')].find((i) => i.label === l)
+    const src = () => icon.querySelector('img')?.getAttribute('src') ?? null
+    const frames = [src()]
+    const held = []
+    const heard = (records) => {
+      for (const r of records) held.push(r.oldValue)
+    }
+    const observer = new MutationObserver(heard)
+    observer.observe(icon, { attributeFilter: ['src'], attributeOldValue: true, subtree: true })
+    let sampling = true
+    const sample = () => {
+      frames.push(src())
+      if (sampling) requestAnimationFrame(sample)
+    }
+    requestAnimationFrame(sample)
+    window.artSeen = async () => {
+      await new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(r)))
+      sampling = false
+      heard(observer.takeRecords())
+      observer.disconnect()
+      return { frames: [...new Set(frames)], held: [...new Set([...held, src()])] }
+    }
+  }, label)
+const artSeen = (page) => page.evaluate(() => window.artSeen())
+
+/** Whether leaving the page would ask first: a cancelable beforeunload, cancelled. */
+const leaveAsks = (page) =>
+  page.evaluate(() => {
+    const e = new Event('beforeunload', { cancelable: true })
+    window.dispatchEvent(e)
+    return e.defaultPrevented
+  })
 
 /** Drop bytes on the page as a file from outside it, at `at`, viewport CSS px. */
 const drop = (page, bytes, name, at) =>
@@ -204,6 +341,7 @@ const answer = async (page, label) => {
 }
 const dialogOpen = (page) => page.evaluate(() => !!document.querySelector('vf-dialog[open]'))
 const until = (page, fn, arg) => page.waitForFunction(fn, arg, { timeout: 10_000 }).then(() => true, () => false)
+const same = (a, b) => JSON.stringify(a) === JSON.stringify(b)
 
 // ── DROP, RELOAD, SKIP ──────────────────────────────────────────────────────
 {
@@ -286,6 +424,12 @@ const until = (page, fn, arg) => page.waitForFunction(fn, arg, { timeout: 10_000
     'SKIP  opening its icon says why it didn’t load',
     said === 'The application “Probe” could not be opened, because its code failed: Probe won\'t start.',
     said
+  )
+  const notRunning = await restart(page, 'probe')
+  check(
+    'REFUSED  restart() refuses one the boot skipped: not running, saying why',
+    notRunning.status === 'refused' && notRunning.why === 'not-running' && notRunning.reason === 'it isn’t running, since its code failed: Probe won\'t start',
+    JSON.stringify(notRunning)
   )
   await page.evaluate(() => localStorage.removeItem('explode:probe'))
   const updated = await install(page, PROBE_NEXT, { replace: true })
@@ -511,6 +655,316 @@ const until = (page, fn, arg) => page.waitForFunction(fn, arg, { timeout: 10_000
     `${arrived} ${bytes.length}/${SIGNED.length}`
   )
   await context.close()
+}
+
+// ── RESTART, ROLLBACK, KIND, ITSELF, ART ────────────────────────────────────
+{
+  // No ?save=1: the shell has no saved session to reopen windows from.
+  const page = await openShell(browser)
+  const s = shellOn(page)
+  /** What the shell says in the console, as errors. */
+  const errors = []
+  page.on('console', (m) => m.type() === 'error' && m.text().startsWith('system-online-sdk') && errors.push(m.text()))
+  /** The windows shown, bottom first, palettes aside, each at its box; the active one; the front application; the bar's label and menus. */
+  const desk = () =>
+    page.evaluate(() => {
+      const d = document.querySelector('vf-desktop')
+      const bar = document.querySelector('vf-menu-bar')
+      return {
+        windows: d.stackingOrder.filter((w) => !w.hidden && !window.shell.windows.isPalette(w)).map((w) => `${w.heading}@${w.left},${w.top}`),
+        active: d.activeWindow?.heading ?? null,
+        front: window.shell.windows.front,
+        bar: [bar.label, ...[...bar.querySelectorAll(':scope > vf-menu')].slice(1).map((m) => m.label)].join(),
+      }
+    })
+  const headings = (d) => d.windows.map((w) => w.slice(0, w.indexOf('@'))).join()
+  await install(page, PROBE)
+  const notes = await page.evaluate(async () => (await window.shell.catalog.create({ kind: 'probe-doc', name: 'Probe Notes', left: 400, top: 200 })).id)
+  const documents = (await s.item('Documents')).id
+  // Probe Notes at the bottom, the Documents folder over it, Probe over that, each moved; then a note in front.
+  await page.evaluate(
+    ([notes, documents]) => {
+      const { apps, windows } = window.shell
+      apps.probe.open({ item: notes })
+      windows.write(windows.windowFor(notes), { left: 120, top: 80 })
+      apps.finder.open({ item: documents })
+      apps.probe.open({})
+      windows.write(windows.windowFor('probe'), { left: 300, top: 200 })
+    },
+    [notes, documents]
+  )
+  await s.settle()
+  await s.pick('Apple', 'Note Pad')
+  await s.settle()
+  const pending = await install(page, PROBE_NEXT, { replace: true })
+  const before = await desk()
+  await page.evaluate(() => (window.oldProbe = window.probes.probe))
+  const restarted = await restart(page, 'probe')
+  await s.settle()
+  const after = await desk()
+  check(
+    'RESTART  restart() runs the pending file in place: restarted from 1.0.0, nothing pending, the new code running, the old context disposed',
+    pending.pending && restarted.status === 'restarted' && restarted.previous === '1.0.0' && restarted.version === '1.1.0' && restarted.loaded && restarted.pending === false &&
+      (await running(page, 'probe')) === '1.1.0' && (await page.evaluate(() => window.oldProbe.disposed && window.probes.probe !== window.oldProbe)),
+    JSON.stringify({ pending, restarted })
+  )
+  check(
+    'RESTART  its windows come back at their boxes and depths among every window, and Note Pad stays in front with its menus',
+    headings(before) === 'Probe Notes,Documents,Probe,Untitled' && before.windows.includes('Probe Notes@120,80') && before.windows.includes('Probe@300,200') && same(after, before) &&
+      after.active === 'Untitled' && after.front === 'note-pad' && after.bar === 'Note Pad,File,Font,Window',
+    JSON.stringify({ before, after })
+  )
+
+  await page.evaluate(() => document.querySelector('vf-desktop').bringToFront(window.shell.windows.windowFor('probe')))
+  await s.settle()
+  const inFront = await desk()
+  const fresh = await restart(page, 'probe')
+  await s.settle()
+  const still = await desk()
+  check(
+    'RESTART  …and in front, with nothing pending: its window active before and after, the bar its own, its code fresh',
+    inFront.active === 'Probe' && fresh.status === 'restarted' && fresh.previous === '1.1.0' && fresh.version === '1.1.0' && same(still, inFront) &&
+      still.front === 'probe' && still.bar === 'Probe',
+    JSON.stringify({ inFront, fresh, still })
+  )
+  // The desktop pressed: no window active, the Finder in front.
+  await page.evaluate(() => document.querySelector('vf-desktop').clearActive())
+  await s.settle()
+  const none = await desk()
+  const unasked = await restart(page, 'probe')
+  await s.settle()
+  const stillNone = await desk()
+  check(
+    'RESTART  …and with no window active, none is after, the Finder still in front',
+    none.active === null && none.front === 'finder' && unasked.status === 'restarted' && same(stillNone, none),
+    JSON.stringify({ none, unasked, stillNone })
+  )
+
+  // ROLLBACK: its init throws, or its open rejects as the windows reopen.
+  for (const [file, what, failed] of [
+    [BREAKS_INIT, 'init throws', 'its init threw'],
+    [BREAKS_OPEN, 'open rejects', 'reopening its windows failed'],
+  ]) {
+    await install(page, file, { replace: true })
+    const was = await desk()
+    errors.length = 0
+    await watchArt(page, 'Probe Notes')
+    const refused = await restart(page, 'probe')
+    const art = await artSeen(page)
+    await s.settle()
+    const now = await desk()
+    const listed = await entry(page, 'probe')
+    check(
+      `ROLLBACK  a pending file whose ${what} is refused with code, the old version running again with its windows back, still pending; the console says so`,
+      refused.status === 'refused' && refused.why === 'code' && refused.reason.startsWith('its code failed: Probe 1.') &&
+        (await running(page, 'probe')) === '1.1.0' && same(now, was) && listed.loaded && listed.pending &&
+        errors.length === 1 && errors[0].startsWith(`system-online-sdk (probe): ${failed}, so the code it ran starts again — Error: ${refused.reason.slice('its code failed: '.length)}`),
+      JSON.stringify({ refused, was, now, listed, errors })
+    )
+    check(
+      `ROLLBACK  …its documents keeping their art throughout, the old code put back in the step the new comes down in (${what})`,
+      art.frames.join() === '/demo/icons/app-icon.png' && art.held.join() === '/demo/icons/app-icon.png',
+      JSON.stringify(art)
+    )
+  }
+
+  await install(page, CLASHING, { replace: true })
+  await page.evaluate(() => (window.heldWindow = window.shell.windows.windowFor('probe')))
+  const clash = await restart(page, 'probe')
+  check(
+    'KIND  a pending file with a kind another application registers is refused before anything closes',
+    clash.why === 'kind' && clash.reason === 'it registers the kind note, which Note Pad registers' && (await running(page, 'probe')) === '1.1.0' &&
+      (await page.evaluate(() => window.heldWindow.isConnected && window.shell.windows.windowFor('probe') === window.heldWindow)),
+    JSON.stringify(clash)
+  )
+
+  await install(page, PROBE_LAST, { replace: true })
+  const itself = await page.evaluate(async () => {
+    const answer = await window.probes.probe.ctx.restart('probe')
+    return { status: answer.status, version: window.probes.probe.version }
+  })
+  check(
+    'ITSELF  an application restarts itself through its own ctx: restarted, the new version running',
+    itself.status === 'restarted' && itself.version === '1.2.0',
+    JSON.stringify(itself)
+  )
+
+  // ART: Probe Notes' icon through a restart onto new art.
+  await install(page, REDRAWN, { replace: true })
+  await watchArt(page, 'Probe Notes')
+  const redrawn = await restart(page, 'probe')
+  const art = await artSeen(page)
+  check(
+    'ART  a document’s icon through a restart: never the Finder’s document art, at a frame or between, and the new code’s art once it runs',
+    redrawn.status === 'restarted' && art.frames.join() === '/demo/icons/app-icon.png,/demo/icons/trash.png' &&
+      art.held.join() === '/demo/icons/app-icon.png,/demo/icons/trash.png',
+    JSON.stringify({ redrawn, art })
+  )
+
+  const refusals = await page.evaluate(async () => [await window.shell.restart('note-pad'), await window.shell.restart('ghost')])
+  check(
+    'REFUSED  restart() refuses an application built in, and an id nothing has',
+    refusals[0].status === 'refused' && refusals[0].why === 'built-in' && refusals[1].status === 'refused' && refusals[1].why === 'not-installed',
+    JSON.stringify(refusals)
+  )
+  await page.close()
+}
+
+// ── BEFORE QUIT, CANCELLED, LEAVING ─────────────────────────────────────────
+{
+  const page = await openShell(browser)
+  const s = shellOn(page)
+  /** Set what an application that quits says: whether it holds something unsaved, and what its offer to save does. */
+  const quitAs = (id, says) => page.evaluate(([i, x]) => Object.assign(((window.probeQuit ??= {})[i] ??= { asked: 0 }), x), [id, says])
+  const asked = (id) => page.evaluate((i) => window.probeQuit[i].asked, id)
+  /** Note an application's window, to tell it from one reopened later; whether the one noted is still the one open. */
+  const noteWindow = (id) => page.evaluate((i) => ((window.noted ??= {})[i] = window.shell.windows.windowFor(i)) !== null, id)
+  const sameWindow = (id) => page.evaluate((i) => window.noted[i].isConnected && window.shell.windows.windowFor(i) === window.noted[i], id)
+  const opened = (id) => page.evaluate((i) => window.shell.windows.windowFor(i) !== null, id)
+
+  await install(page, QUITTER)
+  await install(page, QUITTER_NEXT, { replace: true })
+  await page.evaluate(() => window.shell.apps.quitter.open({}))
+  await s.settle()
+  await noteWindow('quitter')
+  await quitAs('quitter', { unsaved: true, save: 'stays' })
+  const stays = await restart(page, 'quitter')
+  check(
+    'BEFORE QUIT  holding something unsaved, its offer to save is asked once; staying cancels: its window open, the old version running, still pending',
+    stays.status === 'refused' && stays.why === 'cancelled' && (await asked('quitter')) === 1 && (await sameWindow('quitter')) &&
+      (await running(page, 'quitter')) === '1.0.0' && (await entry(page, 'quitter')).pending,
+    JSON.stringify(stays)
+  )
+  await quitAs('quitter', { save: 'throws' })
+  const throws = await restart(page, 'quitter')
+  check(
+    'BEFORE QUIT  an offer to save that throws refuses with code, the old version running',
+    throws.why === 'code' && throws.reason === "its beforeQuit failed: Quitter can't save" && (await asked('quitter')) === 2 &&
+      (await sameWindow('quitter')) && (await running(page, 'quitter')) === '1.0.0',
+    JSON.stringify(throws)
+  )
+  await quitAs('quitter', { unsaved: false, save: 'stays' })
+  const clean = await restart(page, 'quitter')
+  await s.settle()
+  check(
+    'BEFORE QUIT  with nothing unsaved, nothing asks, and it restarts, its window back',
+    clean.status === 'restarted' && (await asked('quitter')) === 2 && (await running(page, 'quitter')) === '1.1.0' && (await opened('quitter')) && !(await sameWindow('quitter')),
+    JSON.stringify(clean)
+  )
+  await noteWindow('quitter')
+  await quitAs('quitter', { unsaved: true, save: 'goes' })
+  const goes = await restart(page, 'quitter')
+  await s.settle()
+  check(
+    'BEFORE QUIT  …and holding something unsaved, going on at its offer restarts it, asked once, its window back',
+    goes.status === 'restarted' && (await asked('quitter')) === 3 && (await opened('quitter')) && !(await sameWindow('quitter')),
+    JSON.stringify(goes)
+  )
+
+  await install(page, STUBBORN)
+  await page.evaluate(() => window.shell.apps.stubborn.open({}))
+  await s.settle()
+  await noteWindow('stubborn')
+  await quitAs('stubborn', { unsaved: true, save: 'goes' })
+  const stood = await restart(page, 'stubborn')
+  await s.settle()
+  check(
+    'BEFORE QUIT  its answer stands: a window whose own close keeps it open closes unasked, and comes back',
+    stood.status === 'restarted' && (await asked('stubborn')) === 1 && (await opened('stubborn')) && !(await sameWindow('stubborn')),
+    JSON.stringify(stood)
+  )
+
+  await install(page, KEEPER)
+  await install(page, KEEPER_NEXT, { replace: true })
+  await page.evaluate(() => window.shell.apps.keeper.open({}))
+  await s.settle()
+  await noteWindow('keeper')
+  const kept = await restart(page, 'keeper')
+  check(
+    'CANCELLED  without a hook, its windows are asked as its Quit asks them: one that stays open cancels, the old version running',
+    kept.status === 'refused' && kept.why === 'cancelled' && (await sameWindow('keeper')) && (await running(page, 'keeper')) === '1.0.0' && (await entry(page, 'keeper')).pending,
+    JSON.stringify(kept)
+  )
+
+  await install(page, SAVER)
+  await page.evaluate(() => window.shell.apps.saver.draft('Draft'))
+  await s.settle()
+  const draft = await s.window('Draft')
+  const filed = await restart(page, 'saver')
+  await s.settle()
+  const doc = await s.item('Draft')
+  const showing = await page.evaluate(() => window.shell.windows.itemOf([...document.querySelectorAll('vf-desktop > vf-window')].find((w) => w.heading === 'Draft') ?? null))
+  check(
+    'SAVED  an untitled window its own close saves comes back as the document it became, where it was',
+    filed.status === 'restarted' && doc?.kind === 'saver-doc' && showing === doc.id && same(await s.window('Draft'), draft),
+    JSON.stringify({ filed, doc, showing, draft })
+  )
+
+  // LEAVING: Note Pad, Stubborn and Quitter have hooks; Keeper has none.
+  await quitAs('stubborn', { unsaved: false })
+  await quitAs('quitter', { unsaved: true })
+  const unsaved = await leaveAsks(page)
+  await quitAs('quitter', { unsaved: false })
+  const saved = await leaveAsks(page)
+  await quitAs('quitter', { unsaved: true })
+  await page.evaluate(() => window.shell.uninstall('quitter'))
+  const gone = await leaveAsks(page)
+  check('LEAVING  leaving the page asks first while an application holds something unsaved', unsaved, JSON.stringify({ unsaved }))
+  check(
+    'LEAVING  …and not once it’s saved, nor for one without a hook, nor once the unsaved one is uninstalled',
+    !saved && !gone,
+    JSON.stringify({ saved, gone })
+  )
+  await page.close()
+}
+
+// ── SESSION ─────────────────────────────────────────────────────────────────
+{
+  const page = await openShell(browser, { query: '?save=1' })
+  const s = shellOn(page)
+  await install(page, HOLDER)
+  const notes = await page.evaluate(async () => (await window.shell.catalog.create({ kind: 'holder-doc', name: 'Holder Notes', left: 400, top: 300 })).id)
+  await page.evaluate((notes) => {
+    const { apps, windows } = window.shell
+    apps.holder.open({})
+    windows.write(windows.windowFor('holder'), { left: 200, top: 100 })
+    apps.holder.open({ item: notes })
+    windows.write(windows.windowFor(notes), { left: 320, top: 180 })
+  }, notes)
+  await s.settle()
+  await install(page, HOLDER_NEXT, { replace: true })
+  const before = [await s.window('Holder'), await s.window('Holder Notes')]
+  const written = await until(
+    page,
+    (id) => {
+      const saved = JSON.parse(localStorage.getItem('system-online-sdk-reference') ?? 'null')
+      return Number.isInteger(saved?.windows?.holder?.z) && saved.windows[id]?.z > saved.windows.holder.z
+    },
+    notes
+  )
+  // Front to back: Holder Notes' question first, answered, and its window
+  // closes; then Holder's, held open while the page goes.
+  await page.evaluate(() => void window.shell.restart('holder'))
+  const asked = await until(page, () => window.probeHeld?.length === 1)
+  if (asked) await page.evaluate(() => window.probeHeld.shift()(true))
+  const held =
+    asked &&
+    (await until(
+      page,
+      (id) => window.probeHeld.length === 1 && !!window.shell.windows.windowFor('holder') && !window.shell.windows.windowFor(id),
+      notes
+    ))
+  await page.reload()
+  await page.evaluate(() => window.shell.ready)
+  await s.settle()
+  const after = [await s.window('Holder'), await s.window('Holder Notes')]
+  const order = await page.evaluate(() => document.querySelector('vf-desktop').stackingOrder.filter((w) => !w.hidden).map((w) => w.heading))
+  check(
+    'SESSION  a page left mid-restart, one window closed and another’s question open: the boot reopens both where they were, on the kept file',
+    written && held && same(after, before) && order.indexOf('Holder') < order.indexOf('Holder Notes') && (await running(page, 'holder')) === '1.1.0',
+    JSON.stringify({ written, held, before, after, order })
+  )
+  await page.close()
 }
 
 /* ── Fixtures ───────────────────────────────────────────────────────────── */

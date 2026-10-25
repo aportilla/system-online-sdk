@@ -16,9 +16,15 @@
  * - A file whose application is already on the desktop, its file kept or
  *   its icons alone, changes nothing unless the caller says to replace it.
  *   Then the icons, their places and the session's windows stay. A loaded
- *   application's code keeps running, and the new file runs from the next
- *   load; one that didn't load loads at once, and its windows from the last
- *   visit reopen.
+ *   application's code keeps running, and the new file runs once it
+ *   restarts, or from the next load; one that didn't load loads at once, and
+ *   its windows from the last visit reopen.
+ * - `restart()` runs a running application's kept file in place of its
+ *   code: the pending one, or its own again, fresh. The file is loaded and
+ *   checked as an install checks it before anything closes, then the shell
+ *   swaps it in (`host.swap`), asking the application before it quits, and
+ *   `pending` clears once the new code runs. It takes its turn with the
+ *   installs, so it never races one.
  * - An application is installed while an icon names it. `uninstall()` takes
  *   every icon of it at once, the Trash's included, and its file; and when
  *   the catalog is left with no icon of an installed application, Empty
@@ -109,7 +115,7 @@ export interface InstalledApp {
   why: SkipReason | null
   /** Why it didn't load, for people; null when `why` is. */
   reason: string | null
-  /** A newer file than the code running is kept, and runs from the next load. */
+  /** A newer file than the code running is kept, and runs once it restarts, or from the next load. */
   pending: boolean
   /** An installed one's file's size; null for one built in. */
   bytes: number | null
@@ -135,6 +141,31 @@ export type UninstallResult =
   | { status: 'uninstalled'; app: InstalledApp }
   | { status: 'refused'; why: 'not-installed' | 'built-in'; reason: string }
 
+/** Why `restart()` refused. */
+export type RestartRefusal =
+  /** No application has the id. */
+  | 'not-installed'
+  /** It's built into the site: its code is the page's own. */
+  | 'built-in'
+  /** It isn't running: the boot skipped it, or it failed. */
+  | 'not-running'
+  /** The visitor cancelled at its offer to save, or a window of it stayed open at its own question. */
+  | 'cancelled'
+  /** Its kept file registers a kind another application registers. */
+  | 'kind'
+  /** Its kept file's code didn't load or start, a window of it didn't reopen on it, or asking it before it quit threw. */
+  | 'code'
+
+/** What `restart()` did. */
+export type RestartResult =
+  /** It runs its kept file now; `previous` is the version that ran before. */
+  | { status: 'restarted'; app: InstalledApp; previous: string | null }
+  /** Refused, the old code running on where any ran: `why` to branch on, `reason` for people. */
+  | { status: 'refused'; why: RestartRefusal; reason: string }
+
+/** What putting new code in place of a running application's came to: the version that ran before, or why not, the old code running on. */
+export type Swapped = { previous: string | null } | { why: 'not-running' | 'cancelled' | 'code'; reason: string }
+
 /** The install door, as `ctx.install`, `shell.install` and a seed's second argument have it. */
 export type Install = (file: Blob | ArrayBuffer | Uint8Array, options?: InstallOptions) => Promise<InstallResult>
 
@@ -155,6 +186,12 @@ export interface InstallsHost {
   stop(id: string): void
   /** Reopen an application's windows from the last visit, as the boot would have, once a page. */
   reopen(id: string): Promise<void>
+  /**
+   * Put `def` in place of the running application of its id: asked before it
+   * quits, then started, its windows reopened on it where they were. A `def`
+   * that fails puts the old code back.
+   */
+  swap(def: AppDefinition): Promise<Swapped>
   /** Raise one of the Finder's alerts and resolve its answer; null with no Finder to raise it. */
   alert<K extends FinderAlert>(id: K, details: FinderAlerts[K]): Promise<string | null> | null
   /** What's installed changed. */
@@ -386,6 +423,29 @@ export function createInstalls(host: InstallsHost) {
     }
   }
 
+  async function restartNow(id: string): Promise<RestartResult> {
+    const no = (why: RestartRefusal, reason: string): RestartResult => ({ status: 'refused', why, reason })
+    if (host.builtIn(id)) return no('built-in', `${id} is built into this desktop`)
+    const entry = kept.get(id)
+    if (!entry) return no('not-installed', `no application ${id} is installed`)
+    if (!entry.loaded) return no('not-running', entry.reason ? `it isn’t running, since ${entry.reason}` : 'it isn’t running')
+    busy.add(id)
+    try {
+      // Loaded and checked before anything closes: a file that fails leaves the old code running.
+      const read = await inspectAppFile(entry.bytes)
+      if (typeof read === 'string') return no('code', read)
+      const loaded = await definitionOf(read.manifest, read.code)
+      if ('why' in loaded) return no(loaded.why, loaded.reason)
+      const swapped = await host.swap(loaded.def)
+      if ('why' in swapped) return no(swapped.why, swapped.reason)
+      entry.pending = false
+      host.changed()
+      return { status: 'restarted', app: entryOf(entry), previous: swapped.previous }
+    } finally {
+      busy.delete(id)
+    }
+  }
+
   /** Load a kept file at the boot, or say why it didn't load. */
   async function load(id: string, record: Item): Promise<void> {
     const data = (record.data ?? {}) as Partial<FileData>
@@ -476,6 +536,8 @@ export function createInstalls(host: InstallsHost) {
   return {
     install,
     uninstall: (id: string): Promise<UninstallResult> => serial(() => uninstallNow(id)),
+    /** Restart a running installed application on its kept file. */
+    restart: (id: string): Promise<RestartResult> => serial(() => restartNow(id)),
     /** Load what's kept, drop what no icon names, and start the sweep: the boot's step after the seed. */
     boot: (): Promise<void> => serial(bootNow),
     /** Every installed application, in the order they were installed. */
@@ -497,6 +559,8 @@ export function createInstalls(host: InstallsHost) {
       k.loaded = false
       k.why = 'code'
       k.reason = `its code failed: ${said(error)}`
+      // No code runs for a newer file to wait behind.
+      k.pending = false
     },
 
     /** The `app` kind's art for an installed application: its manifest's icon, loaded or not. */

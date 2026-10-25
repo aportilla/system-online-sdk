@@ -90,7 +90,7 @@ document.addEventListener('gesturestart', (e) => e.preventDefault())
 
 Panning stays, so a finger still scrolls a window.
 
-`createShell()` returns `{ desktop, windows, catalog, apps, ready, install, uninstall, installed, onInstalled, appFile, dispose() }`. `ready` settles once the desktop and its menu bar have rendered, the catalog is read, the seed stored, the installed applications loaded, the last session's windows reopened and Startup Items opened. `install()` and the rest are the installs (§ Installing applications). `dispose()` takes everything down, the applications' own setup and every window included, so a hot reload starts clean. The saved session stops before the windows go, so with `state` set the reload reopens them.
+`createShell()` returns `{ desktop, windows, catalog, apps, ready, install, uninstall, restart, installed, onInstalled, appFile, dispose() }`. `ready` settles once the desktop and its menu bar have rendered, the catalog is read, the seed stored, the installed applications loaded, the last session's windows reopened and Startup Items opened. `install()` and the rest are the installs (§ Installing applications). `dispose()` takes everything down, the applications' own setup and every window included, so a hot reload starts clean. The saved session stops before the windows go, so with `state` set the reload reopens them.
 
 ## Applications
 
@@ -153,12 +153,39 @@ What `init` gets:
 | `apps`, `app(id)`, `opener(kind)` | Every application's actions, read at the call, and the definitions. `opener('font')` is the application that opens font suitcases, or undefined (§ Fonts). |
 | `catalog`, `kinds`, `kind(name)` | The catalog, when a Finder runs, and the registered kinds, the shell's `app`, `alias` and `font` first. |
 | `fonts` | The system's fonts: the installed families, any family the site serves, a strike loaded on request, and a notice when the installed families change (§ Fonts). |
-| `install(file, options)`, `uninstall(id)` | Install an app file through the site's trust, and uninstall an installed application (§ Installing applications). |
+| `install(file, options)`, `uninstall(id)`, `restart(id)` | Install an app file through the site's trust, uninstall an installed application, and restart one on its kept file (§ Installing applications). |
 | `installed()`, `onInstalled(fn)`, `appFile(id)` | What's installed, every application built in or installed; a notice each time any of it changes, torn down with the application; and an installed application's file. |
 | `ready` | Settles once the boot is done: every application loaded or skipped, the session reopened. |
 | `index` | The URL of the site's index of app files, or `null` (§ The index). |
 | `services`, `state` | The site's objects and the saved session. |
-| `on(target, type, fn)`, `onDispose(fn)` | A listener and a teardown, both undone by `dispose()`, and by an uninstall. |
+| `on(target, type, fn)`, `onDispose(fn)` | A listener and a teardown, both undone by `dispose()`, and by an uninstall or a restart. |
+| `beforeQuit(hooks)` | Whether it holds user data not yet saved, and its offer to save it, asked before the shell takes it down and when the page goes (§ Asking before it quits). |
+
+### Asking before it quits
+
+An application that holds user data it hasn't saved, an edited document say, says so whenever it's asked, and offers to save it:
+
+```ts
+init(ctx) {
+  /** Note windows with changes not yet saved. */
+  const edited = new WeakSet<VfWindow>()
+  // …
+  ctx.beforeQuit({
+    // Whether it holds user data not yet saved, at the moment it's asked.
+    unsaved: () => ctx.windows.windowsOf('note-pad').some((win) => edited.has(win)),
+    // Its own offer to save, asked only while there's something to save:
+    // its Quit, each edited note's close asking Save, Don't Save or Cancel.
+    save: () => ctx.windows.closeAll('note-pad'),
+  })
+}
+```
+
+- The shell reads `unsaved()` before it takes the application down, a restart say (§ Restarting), and asks `save()` if, and only if, it holds. With nothing unsaved, nothing asks.
+- `save()` is an offer to save, not a confirm: the application's own alert and its own save, a name asked for an untitled document say. It resolves `true` to go on, saved or let go at the visitor's word, and `false` to stay, a Cancel. Its answer stands: once it goes on, the shell closes the application's windows without asking them again.
+- While `unsaved()` holds, leaving the page asks first. The browser allows only its own question there, so that's the one; the offer to save is for what the shell takes down while the page stays. `unsaved()` is synchronous, so that the page's leaving can ask it.
+- A hook that throws errs on the data's side: a restart is refused, and leaving the page asks.
+- One hook per application, a second call replacing the first, torn down with it. A built-in application can register one too, which only the page's leaving asks, since a built-in doesn't restart.
+- Without a hook, a restart asks each of the application's windows to close as its Quit does (`windows.closeAll`), so a close handler that offers to save keeps working unregistered.
 
 ## Dialogs
 
@@ -600,7 +627,7 @@ A fresh install that fails changes nothing: no file, no icon. The Finder's own d
 
 A file whose application is already on the desktop, its file kept or icons alone, answers `present` and changes nothing until the caller says `replace`. A dropped or pasted one asks first in the Finder's `replace-application` alert, signed or not. Replacing keeps the icons, their places and the session's windows, and goes forward or back to whatever file it's given: choosing a version is the caller's.
 
-- A loaded application keeps its code running, and the new file runs from the next load: its entry in what's installed says `pending`.
+- A loaded application keeps its code running, and the new file runs once it restarts (§ Restarting), or from the next load: until then its entry in what's installed says `pending`.
 - One that didn't load loads at once, so its icon opens this session, and the windows it had open at the last visit reopen where they were.
 - Icons with no file, an application's from before it was installed, take the file, and the application loads the same way.
 
@@ -609,6 +636,44 @@ A file whose application is already on the desktop, its file kept or icons alone
 An application is installed while an icon names it. `uninstall(id)`, on the shell and on `ctx`, removes every icon of it at once, wherever it is, the Trash included, and its file. It asks nothing, since the caller asks first, and resolves `{ status: 'uninstalled', app }`, or `{ status: 'refused', why, reason }` with `why` `'not-installed'` or `'built-in'`. Empty Trash uninstalls an application whose last icon it removes, and so does anything else that leaves the catalog with no icon of it, a restore that replaces the catalog say.
 
 Either way, a running application comes down as `dispose()` takes it down: its windows close, its menus and kinds go, and what its `init` set up comes down through its own `onDispose`. Its documents stay (§ Documents nothing opens), and an alias of one of its icons stays, as an alias whose original is gone.
+
+### Restarting
+
+`restart(id)`, on the shell and on `ctx`, runs an installed application's kept file in place of the code running, without a reload: the pending file after an update, else the same file again, fresh. The desktop and every other application are untouched.
+
+```ts
+const answer = await ctx.install(bytes, { replace: true })
+if (answer.status === 'updated' && answer.app.pending) await ctx.restart(answer.app.id)
+```
+
+It waits for the boot (`ready`), then takes its turn with the installs, so it never races an install, an uninstall or the session's reopening. It runs only what's kept, which the site's trust already took, so it adds no power: any application may restart another, as it may uninstall one.
+
+1. **The new code loads before anything closes.** The kept file's code is loaded and checked as an install checks it: its factory, its id, its kinds against every other application's. Code that doesn't load refuses the restart, and the old code runs on, still `pending`.
+2. **It's asked before it quits** (§ Asking before it quits): its offer to save, while it holds something unsaved, or without a hook, each of its windows as its Quit asks them. A Cancel refuses the restart: the old code runs on, and a window that closed before the Cancel stays closed, as at a Quit.
+3. **The old stops and the new starts in one step.** The old code comes down as an uninstall takes it down, closing what's still open without asking, and the new starts, with nothing between: an icon, an alias or the Apple menu opening it at any moment finds the old code or the new running, and the Finder never draws its documents without their kind.
+4. **Its windows reopen.** Each window that showed an item as it closed, a document saved at step 2 included, opens again through the new code's `open({ item })`, at the box it had. Each goes back to its depth among every window on the desktop, and the active window is the one it was, or none: the front application stays the one it was, this one with its menus if it was in front. A window with no item doesn't come back, as at a reload.
+5. **It says so.** `pending` clears, and `onInstalled` fires, which also redraws the Finder's icons with the new code's kinds.
+
+If the new code fails, its `init` throwing or an `open` rejecting as its windows reopen, it comes down and the old code starts again in its place, fresh, in the same one step, with its windows reopened the same way. The restart is refused, still `pending`. If the old code fails too, it's down, as a failed reopen leaves one, and what's installed says why. The console names each failure.
+
+The saved session holds through a restart, as it holds through the boot: a write while the windows are closed would drop their depth. A page left mid-restart, at the offer to save say, reopens them at the next boot, on the kept file.
+
+It resolves `{ status: 'restarted', app, previous }`, `app` its entry in what's installed and `previous` the version that ran before, or `{ status: 'refused', why, reason }`, the old code running on where any ran:
+
+| `why` | |
+| --- | --- |
+| `not-installed` | No application has that id. |
+| `built-in` | It's in `apps`: its code is the page's own. |
+| `not-running` | The boot skipped it, or it failed. `install` with `replace` loads one of those at once already. |
+| `cancelled` | It held something unsaved and the visitor cancelled at its offer to save, or a window of it stayed open at its own close's question. |
+| `code` | Its code didn't load, its factory gave no application, its `init` threw, an `open` rejected as its windows reopened, or asking it before it quit threw. |
+| `kind` | It registers a kind another application registers, which `reason` names. |
+
+What carries over is what the application keeps outside its code: its catalog items, its documents, what it saved at its offer to save, its icons and their places, its windows' boxes, and what it keeps in storage of its own, a best score say. What it holds in memory doesn't, as at a reload: a game in progress ends. Another application's `ctx.apps` reads the new code's actions, since it reads them at the call. A palette is its `init`'s to adopt again, as at a reload; one with an item, adopted with `pin: ctx.windows.rememberedPin(item) ?? ctx.state?.pin(item)`, keeps the box it had.
+
+An application that restarts itself does nothing after the call. The restart waits for the boot, its turn and the new code's load before anything closes, so the handler that called it has returned; the promise settles once the new code runs, into the old code, whose `ctx` is torn down, and anything that code sets up then is never torn down.
+
+An application on a page older than `restart` and `beforeQuit` finds neither. One that wants such pages checks for them before it uses them, as for `ctx.install`.
 
 ### What's installed
 
@@ -622,7 +687,7 @@ Either way, a running application comes down as `dispose()` takes it down: its w
 | `standing`, `key` | An installed one's standing with the site's trust at its last check, and the public key that signed it (§ Trust). `null` for one built in. |
 | `loaded` | Whether it loaded and runs. |
 | `why`, `reason` | Why it didn't load: `'not-app-file'`, `'api'`, `'signature'`, `'untrusted'`, `'kind'` or `'code'`, and the words for people. `null` while it loaded, or hasn't yet. |
-| `pending` | A newer file than the code running is kept, and runs from the next load. |
+| `pending` | A newer file than the code running is kept, and runs once the application restarts (§ Restarting), or from the next load. |
 | `bytes` | An installed one's file's size, or `null`. |
 
 `ctx.ready`, as `shell.ready`, settles once the boot is done, so an application can act once every other has loaded or been skipped. An application installed after the boot finds it settled.
@@ -742,4 +807,4 @@ import { createCatalog, memoryStorage, childrenOf, isPin, cascadedBox } from 'sy
 
 ## The reference page
 
-This repo's `index.html` runs the shell with the Finder and Note Pad, a small application with documents of its own kind, an Info palette, a close that asks about unsaved changes in an alert of its own, a `claim` that makes a note of a dropped text file, and a Font menu of the installed families (`demo/main.ts`). Its System Folder sits on the desktop. Its Apple Menu Items holds Note Pad, and its Fonts a suitcase of each of the two families the page serves its system, vintage-frames' own faces (`demo/fonts.ts`). No application there opens a suitcase, so opening one raises the Finder's alert. It sets no trust, so an app file dropped on it installs. `?save=1` keeps the catalog, the installs and the session across reloads, `?cleanup=1` turns on Clean Up after a resize, and `?open=Projects&open=Archive` opens those items at load. `verify:front`, `verify:windows`, `verify:finder`, `verify:fonts` and `verify:installs` drive it, the last two fixtures of their own too, and `verify:unit` tests the pure modules and the build entry under Node ([DEVELOPING.md](./DEVELOPING.md)).
+This repo's `index.html` runs the shell with the Finder and Note Pad, a small application with documents of its own kind, an Info palette, a close that asks about unsaved changes in an alert of its own, a `beforeQuit` that makes leaving the page ask first while a note is unsaved, a `claim` that makes a note of a dropped text file, and a Font menu of the installed families (`demo/main.ts`). Its System Folder sits on the desktop. Its Apple Menu Items holds Note Pad, and its Fonts a suitcase of each of the two families the page serves its system, vintage-frames' own faces (`demo/fonts.ts`). No application there opens a suitcase, so opening one raises the Finder's alert. It sets no trust, so an app file dropped on it installs. `?save=1` keeps the catalog, the installs and the session across reloads, `?cleanup=1` turns on Clean Up after a resize, and `?open=Projects&open=Archive` opens those items at load. `verify:front`, `verify:windows`, `verify:finder`, `verify:fonts` and `verify:installs` drive it, the last two fixtures of their own too, and `verify:unit` tests the pure modules and the build entry under Node ([DEVELOPING.md](./DEVELOPING.md)).

@@ -13,13 +13,15 @@
  */
 
 export { createShell, defineApp } from './shell.js'
-export type { AppContext, AppDefinition, CatalogSetup, KindDefinition, Shell, ShellOptions, SystemFonts } from './shell.js'
+export type { AppContext, AppDefinition, CatalogSetup, KindDefinition, QuitHooks, Shell, ShellOptions, SystemFonts } from './shell.js'
 export type {
   Install,
   InstallOptions,
   InstallRefusal,
   InstallResult,
   InstalledApp,
+  RestartRefusal,
+  RestartResult,
   SkipReason,
   UninstallResult,
 } from './installs.js'

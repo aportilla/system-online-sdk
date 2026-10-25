@@ -16,10 +16,19 @@
  *   own menus, dialogs and window markup, the other applications' actions
  *   (read at the call), the catalog when a Finder runs, the system's fonts,
  *   the site's services and index, `ask()`, `gate()`, `onFront()`,
- *   `onDispose()`, and the installs: `install()`, `uninstall()` and what's
- *   installed. Everything it sets up comes down through `onDispose()`, and
- *   its dialogs with it, so a hot reload starts clean. The shell composes no
- *   UI of its own.
+ *   `onDispose()`, `beforeQuit()`, and the installs: `install()`,
+ *   `uninstall()`, `restart()` and what's installed. Everything it sets up
+ *   comes down through `onDispose()`, and its dialogs with it, so a hot
+ *   reload starts clean. The shell composes no UI of its own.
+ * - An application says, through `beforeQuit()`, whether it holds user data
+ *   it hasn't saved, and offers to save it. The shell asks the offer before
+ *   it takes the application down, and only while something is unsaved;
+ *   leaving the page asks first then too, in the browser's own words.
+ * - `restart()` runs an installed application's kept file in place of its
+ *   code, without a reload: asked before it quits, through its hook or else
+ *   its windows' own closes, then the old code stopped and the new started
+ *   in one step, and its windows reopened on the new code at their boxes
+ *   and depths. New code that fails puts the old back.
  * - Applications come from `apps`, built in, and from app files installed at
  *   runtime (installs.ts), which register as the built-in ones do and come
  *   down when they're uninstalled. Two applications with one id, or one kind
@@ -74,7 +83,7 @@ import { installedFamiliesOf } from './fonts.js'
 import type { FontFamily } from './fonts.js'
 import type { Point } from './geometry.js'
 import { createInstalls } from './installs.js'
-import type { Install, InstallOptions, InstallResult, InstalledApp, UninstallResult } from './installs.js'
+import type { Install, InstallOptions, InstallResult, InstalledApp, RestartResult, Swapped, UninstallResult } from './installs.js'
 import { loadStrike } from './strikes.js'
 import { createWindowManager, deepActiveElement, desktopRendered } from './windows.js'
 import type { WindowManager } from './windows.js'
@@ -196,6 +205,14 @@ export interface AppContext {
   install(file: Blob | ArrayBuffer | Uint8Array, options?: InstallOptions): Promise<InstallResult>
   /** Uninstall an installed application: every icon of it, wherever it is, and its file. It asks nothing. */
   uninstall(id: string): Promise<UninstallResult>
+  /**
+   * Restart an installed application on its kept file, the pending one if
+   * there is one: asked before it quits (`beforeQuit`), then reopened on the
+   * new code where its windows were. Resolves restarted, or refused and why,
+   * the old code running on. An application that restarts itself does
+   * nothing after the call.
+   */
+  restart(id: string): Promise<RestartResult>
   /** Every application on the desktop, built in or installed, loaded or not. */
   installed(): InstalledApp[]
   /** Follow what's installed: `fn` gets it each time any of it changes. Torn down with the application. */
@@ -236,8 +253,17 @@ export interface AppContext {
   onFront(fn: (front: boolean) => void): void
   /** A listener torn down with the application. */
   on(target: EventTarget, type: string, fn: (e: Event) => void, options?: boolean | AddEventListenerOptions): void
-  /** Run `fn` when the shell is disposed, or the application is uninstalled. */
+  /** Run `fn` when the shell is disposed, or the application is uninstalled or restarts. */
   onDispose(fn: () => void): void
+  /**
+   * Ask before it quits. Before the shell takes the application down, a
+   * restart say, it reads `unsaved()`, and only while that holds asks
+   * `save()`, the application's own offer to save; while it holds, leaving
+   * the page asks first, in the browser's own words. Without a hook, a
+   * restart asks each of its windows to close, as its Quit does. One per
+   * application: a second call replaces the first. Torn down with it.
+   */
+  beforeQuit(hooks: QuitHooks): void
 }
 
 /** The system's fonts, on every application's context. */
@@ -260,6 +286,18 @@ export interface SystemFonts {
   load(family: string, size: number): Promise<string | null>
   /** Follow the installed families: `fn` gets them each time they change, and only then. Torn down with the application. */
   onChange(fn: (installed: FontFamily[]) => void): void
+}
+
+/** What an application tells the shell before it quits: whether it holds user data not yet saved, and its offer to save it. */
+export interface QuitHooks {
+  /** Whether it holds user data not yet saved, at the moment it's asked: an edited document, say. Synchronous, so leaving the page can ask it. */
+  unsaved(): boolean
+  /**
+   * Offer to save that data, in its own alert: called only while `unsaved()`
+   * holds. Resolves true to go on, saved or let go at the visitor's word, and
+   * false to stay, a Cancel.
+   */
+  save(): Promise<boolean>
 }
 
 /** Declare an application, with its actions' type. */
@@ -302,6 +340,8 @@ export interface Shell {
   install(file: Blob | ArrayBuffer | Uint8Array, options?: InstallOptions): Promise<InstallResult>
   /** Uninstall an installed application, as `ctx.uninstall` does. */
   uninstall(id: string): Promise<UninstallResult>
+  /** Restart an installed application on its kept file, as `ctx.restart` does. */
+  restart(id: string): Promise<RestartResult>
   /** Every application on the desktop, built in or installed, loaded or not. */
   installed(): InstalledApp[]
   /** Follow what's installed. Returns the unsubscribe. */
@@ -330,6 +370,8 @@ interface Running {
   own: (() => void)[]
   /** Whether its `init` has returned. */
   started: boolean
+  /** What it said to ask before it quits, or null. */
+  quit: QuitHooks | null
 }
 
 /** Check a site's trust, which a typo would otherwise leave open. */
@@ -618,6 +660,7 @@ export function createShell(desktop: VfDesktop, options: ShellOptions): Shell {
       kinds: [],
       own: [],
       started: false,
+      quit: null,
     }
     for (const [kind, k] of Object.entries(def.kinds ?? {})) {
       if (!shellKinds.has(kind)) {
@@ -632,8 +675,12 @@ export function createShell(desktop: VfDesktop, options: ShellOptions): Shell {
     return entry
   }
 
-  /** Run an admitted application's `init`. One that throws comes down alone: what it threw, or null once it runs. */
-  function begin(entry: Running): { error: unknown } | null {
+  /**
+   * Run an admitted application's `init`. One that throws comes down alone,
+   * the console saying so and what follows, `then`: what it threw, or null
+   * once it runs.
+   */
+  function begin(entry: Running, then = "so it doesn't run"): { error: unknown } | null {
     const { def, menus, dialogs, windows: windowMarkup, own } = entry
     const where = `system-online-sdk (${def.id})`
     // Its dialogs, held under it from the start and removed with it last.
@@ -674,6 +721,7 @@ export function createShell(desktop: VfDesktop, options: ShellOptions): Shell {
       opener,
       install: (file, opts) => installs.install(file, opts),
       uninstall: (id) => installs.uninstall(id),
+      restart,
       installed: installedList,
       onInstalled(fn) {
         installedListeners.add(fn)
@@ -757,6 +805,14 @@ export function createShell(desktop: VfDesktop, options: ShellOptions): Shell {
       onDispose(fn) {
         own.push(fn)
       },
+      beforeQuit(hooks) {
+        entry.quit = hooks
+        syncLeaving()
+        own.push(() => {
+          if (entry.quit === hooks) entry.quit = null
+          syncLeaving()
+        })
+      },
     }
     try {
       const result = def.init(ctx)
@@ -764,7 +820,7 @@ export function createShell(desktop: VfDesktop, options: ShellOptions): Shell {
       entry.started = true
       return null
     } catch (error) {
-      console.error(`${where}: its init threw, so it doesn't run —`, error)
+      console.error(`${where}: its init threw, ${then} —`, error)
       stop(def.id)
       return { error }
     }
@@ -799,6 +855,11 @@ export function createShell(desktop: VfDesktop, options: ShellOptions): Shell {
   /** A running application failed after it started: its reopen rejected, say. It comes down alone, and says why. */
   function failed(id: string, error: unknown): void {
     console.error(`system-online-sdk (${id}): reopening its windows failed, so it doesn't run —`, error)
+    down(id, error)
+  }
+
+  /** An application that failed comes down for good, and what's installed says why. */
+  function down(id: string, error: unknown): void {
     stop(id)
     if (builtIn(id)) failures.set(id, `its code failed: ${said(error)}`)
     else installs.failed(id, error)
@@ -823,6 +884,151 @@ export function createShell(desktop: VfDesktop, options: ShellOptions): Shell {
     }
   }
 
+  // Leaving the page asks first while an application holds something
+  // unsaved: the browser's own question, the only one it allows there. Heard
+  // only while an application has a hook.
+  let leaving = false
+  const onLeave = (e: BeforeUnloadEvent) => {
+    for (const { def, quit } of apps.values()) {
+      let unsaved = false
+      try {
+        unsaved = !!quit?.unsaved()
+      } catch (err) {
+        // A hook that throws errs on the data's side.
+        console.error(`system-online-sdk (${def.id}): its unsaved() threw —`, err)
+        unsaved = true
+      }
+      if (!unsaved) continue
+      e.preventDefault()
+      // For browsers that read the legacy property.
+      e.returnValue = ''
+      return
+    }
+  }
+  const syncLeaving = () => {
+    const want = [...apps.values()].some((a) => a.quit)
+    if (want === leaving) return
+    leaving = want
+    if (want) window.addEventListener('beforeunload', onLeave)
+    else window.removeEventListener('beforeunload', onLeave)
+  }
+  teardown.push(() => {
+    leaving = false
+    window.removeEventListener('beforeunload', onLeave)
+  })
+
+  /**
+   * Ask an application before it's taken down: its offer to save, only while
+   * it holds something unsaved, else each of its windows as its Quit asks
+   * them. True to go on, false at a Cancel, or why asking failed.
+   */
+  async function mayQuit(id: string): Promise<boolean | { reason: string }> {
+    const hooks = apps.get(id)?.quit
+    try {
+      if (!hooks) return await wm.closeAll(id)
+      // Its answer stands: Don't Save goes on, the data let go.
+      return !hooks.unsaved() || (await hooks.save()) === true
+    } catch (error) {
+      const asking = hooks ? 'its beforeQuit' : 'closing its windows'
+      console.error(`system-online-sdk (${id}): ${asking} threw, so it keeps running —`, error)
+      return { reason: `${asking} failed: ${said(error)}` }
+    }
+  }
+
+  /** Stop what runs under `def`'s id and start `def` in its place, in one step: what its init threw, or null once it runs. */
+  function startInPlace(def: AppDefinition, then?: string): { error: unknown } | null {
+    stop(def.id)
+    const thrown = begin(admit(def), then)
+    // stop() slotted the default application's menus, never painted: the new code's, if it's in front.
+    sync()
+    return thrown
+  }
+
+  /** Reopen `items` on what runs under `id`, in order: what an `open` threw, said in the console with `then`, or null. */
+  async function reopenOn(id: string, items: string[], then = "so it doesn't run"): Promise<{ error: unknown } | null> {
+    for (const item of items) {
+      try {
+        await actions[id]?.open?.({ item })
+      } catch (error) {
+        console.error(`system-online-sdk (${id}): reopening its windows failed, ${then} —`, error)
+        return { error }
+      }
+    }
+    return null
+  }
+
+  /**
+   * Raise the windows again in `stack`'s order, from the lowest of the
+   * restarted application's up, each of its by the item it showed: the
+   * active window is the front one again, or none when none was.
+   */
+  function restack(stack: HTMLElement[], items: Map<Element, string | null>, active: HTMLElement | null): void {
+    const from = stack.findIndex((win) => items.has(win))
+    for (const win of from < 0 ? [] : stack.slice(from)) {
+      const item = items.get(win)
+      const now = item === undefined ? win : item === null ? null : wm.windowFor(item)
+      if (now?.isConnected) desktop.bringToFront(now)
+    }
+    if (!active) desktop.clearActive()
+  }
+
+  /**
+   * Put `next` in place of the running application of its id: asked before
+   * it quits, the old stopped and the new started in one step, and its
+   * windows reopened on the new code at their boxes and depths. New code
+   * that fails, its init or a reopen, comes down and the old starts again in
+   * its place, in one step too. The session holds throughout: a write while
+   * its windows are closed would drop their depth.
+   */
+  async function swap(next: AppDefinition): Promise<Swapped> {
+    const id = next.id
+    const running = apps.get(id)
+    if (!running?.started) return { why: 'not-running', reason: 'it isn’t running' }
+    const old = running.def
+    // The stack before anything closes, and each window's item as it
+    // changes: a Save at its question gives an untitled one its item.
+    const stack = desktop.stackingOrder
+    const active = desktop.activeWindow
+    const items = new Map<Element, string | null>()
+    const note = () => {
+      for (const win of wm.windowsOf(id)) if (!wm.isPalette(win)) items.set(win, wm.itemOf(win))
+    }
+    note()
+    const offNote = wm.onWindows(note)
+    state?.hold()
+    try {
+      const may = await mayQuit(id)
+      offNote()
+      if (may === false) return { why: 'cancelled', reason: 'the visitor kept it running at its own question' }
+      if (may !== true) return { why: 'code', reason: may.reason }
+      // The items its windows showed, deepest first, as the boot reopens a session.
+      const shown = stack.flatMap((win) => {
+        const item = items.get(win)
+        return item == null ? [] : [item]
+      })
+      const again = 'so the code it ran starts again'
+      const failure = startInPlace(next, again) ?? (await reopenOn(id, shown, again))
+      if (!failure) {
+        restack(stack, items, active)
+        return { previous: old.manifest?.version ?? null }
+      }
+      // The old code in its place, in the step the new comes down in, and its
+      // windows again; failing too, it's down, as a failed reopen leaves one.
+      const back = startInPlace(old) ?? (await reopenOn(id, shown))
+      if (back) {
+        down(id, back.error)
+      } else {
+        restack(stack, items, active)
+        // Its kinds are the old code's again: the Finder draws them.
+        announce()
+      }
+      return { why: 'code', reason: `its code failed: ${said(failure.error)}` }
+    } finally {
+      offNote()
+      state?.release()
+    }
+  }
+
   const installs = createInstalls({
     catalog,
     storage: finderDef?.catalog?.storage ?? null,
@@ -840,9 +1046,20 @@ export function createShell(desktop: VfDesktop, options: ShellOptions): Shell {
     start: (def) => begin(admit(def)),
     stop,
     reopen,
+    swap,
     alert: finderAlert,
     changed: announce,
   })
+
+  /**
+   * Restart an installed application on its kept file, once the boot is
+   * done, in its turn with the installs. It waits for the boot outside the
+   * queue: inside, it would wait on the boot's own turn, queued behind it.
+   */
+  const restart = async (id: string): Promise<RestartResult> => {
+    await ready.catch(() => {})
+    return installs.restart(id)
+  }
 
   // Applications: every built-in one's kinds first, then each one's init, in order.
   for (const entry of definitions.map(admit)) {
@@ -1037,6 +1254,7 @@ export function createShell(desktop: VfDesktop, options: ShellOptions): Shell {
     ready,
     install: (file, opts) => installs.install(file, opts),
     uninstall: (id) => installs.uninstall(id),
+    restart,
     installed: installedList,
     onInstalled(fn) {
       installedListeners.add(fn)

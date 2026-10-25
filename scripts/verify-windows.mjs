@@ -16,6 +16,8 @@
  *  - CLOSE: a document with unsaved changes asks before it closes, in Note
  *    Pad's own dialog; Cancel and Escape keep it, Don’t Save and Save close
  *    it, and Save files it. The dialog stays held, closed, for the next ask.
+ *  - LEAVING: while a note is unsaved, leaving the page asks first (Note
+ *    Pad's beforeQuit); once it's saved, nothing asks.
  *  - WINDOWS: each ctx.window() is a fresh copy of the application's markup.
  *  - CLOSE ALL: closeAll() asks each of an application's windows front to
  *    back and stops at a Cancel; an Option-click on a close box closes
@@ -383,6 +385,30 @@ const layout = (page) =>
     JSON.stringify(note)
   )
   check('CLOSE  …and its icon is on the desktop', (await s.iconState('Untitled 2'))?.in === null)
+  await page.close()
+}
+
+// ── LEAVING ─────────────────────────────────────────────────────────────────
+{
+  const page = await openShell(browser)
+  const s = shellOn(page)
+  /** Whether leaving the page would ask first: a cancelable beforeunload, cancelled. */
+  const asks = () =>
+    page.evaluate(() => {
+      const e = new Event('beforeunload', { cancelable: true })
+      window.dispatchEvent(e)
+      return e.defaultPrevented
+    })
+  await s.pick('Apple', 'Note Pad')
+  await s.settle()
+  const clean = await asks()
+  await page.keyboard.type('Draft')
+  const edited = await asks()
+  check('LEAVING  an unsaved note makes leaving the page ask first, and an untouched one doesn’t', edited && !clean, JSON.stringify({ clean, edited }))
+  await s.pick('File', 'save')
+  await page.waitForFunction(() => window.shell.windows.itemOf(document.querySelector('vf-desktop').activeWindow) !== null)
+  const saved = await asks()
+  check('LEAVING  …and once it’s saved, nothing asks', !saved && (await s.item('Untitled'))?.data?.text === 'Draft', JSON.stringify({ saved }))
   await page.close()
 }
 

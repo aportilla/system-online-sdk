@@ -231,6 +231,7 @@ Give each application a directory of its own:
 - Browsers keep ⌘N, ⌘W and ⌘Q, so use ⌃N, ⌃W and ⌃Q.
 - An application doesn't add items to the system menu. A site puts one in the Apple menu by filing an alias of it in Apple Menu Items ([step 4](#4-the-apple-menu-and-startup)).
 - Fonts are the system's. An application sets type in the families the site serves through `ctx.fonts`, and carries no strikes of its own: `installed()` and `onChange()` for a Font menu, and `load()` for a strike to set on its own elements ([SHELL.md § Fonts](./SHELL.md#fonts)). One that opens font suitcases says `opens: ['font']`; the kind is the shell's.
+- An application that holds user data it hasn't saved, an edited document say, registers `ctx.beforeQuit`: whether something is unsaved, and its own offer to save it. A restart asks the offer, only while something is unsaved, and leaving the page asks first then ([SHELL.md § Asking before it quits](./SHELL.md#asking-before-it-quits)). Without it, a restart asks its windows' close handlers, as a Quit does.
 - Modules that only compute, `layout.ts` say, import from `system-online-sdk/pure`, so their tests run under Node.
 - The shell draws no windows or dialogs of its own: every window and alert on screen belongs to an application. When an application needs something the shell doesn't do, change the SDK rather than working around it: ask for it as `feature-requests/<name>.md` in this repo. An ask about an element goes to vintage-frames.
 
@@ -550,6 +551,7 @@ On vintage-frames `^0.16.2`. Beside the SDK, it takes:
 - **0.19.0** removed `ctx.systemItem`, which Desktop Patterns calls. The Finder's File menu gains Make Alias (⌘M).
 - **0.19.1**: a menu now tracks the pointer while it's open, whether or not the button is down, and menus can nest.
 - **system-online-sdk 0.2.0** added the system's fonts. Nothing to change: a site that gives no fonts and names no Fonts folder sees none, and its kinds, `sprite` and `text`, aren't the shell's.
+- **system-online-sdk 0.3.1** added `ctx.beforeQuit` ([SHELL.md § Asking before it quits](./SHELL.md#asking-before-it-quits)). The Sprite Editor registers it in place of the `beforeunload` in `src/main.js`, `unsaved` its `workspace.anyDirty()` and `save` its Quit, `windows.closeAll(SPRITE_EDITOR)`, whose close handlers offer to save each edited document. Leaving the page asks as before, and once the editor ships in an app file, a restart offers to save first. It takes `^0.3.1` in step 1.
 
 Steps, in order:
 
