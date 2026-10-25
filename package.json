@@ -1,6 +1,6 @@
 {
   "name": "system-online-sdk",
-  "version": "0.3.0",
+  "version": "0.3.1",
   "description": "Applications over a System 7 desktop: the shell, its Finder, and app files, on vintage-frames' elements",
   "type": "module",
   "license": "MIT",
