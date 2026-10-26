@@ -18,6 +18,26 @@
  *    it, and Save files it. The dialog stays held, closed, for the next ask.
  *  - LEAVING: while a note is unsaved, leaving the page asks first (Note
  *    Pad's beforeQuit); once it's saved, nothing asks.
+ *  - FULL SCREEN: ⌃F (Note Pad's Window → Full Screen) gives the front note
+ *    the whole screen, frameless on the desktop's tier above the bar; the
+ *    bar, the icons and the other windows go inert, the held dialog doesn't;
+ *    it covers the bar and the icons, the focus stays in it, onFullScreen is
+ *    heard with the box written, Tab never leaves it, a press on the bezel
+ *    changes nothing, the item reads Exit Full Screen, and a resize writes
+ *    the new screen's box, heard.
+ *  - COVERED: with the bar covered, ⌘S saves and ⌃W asks Save Changes over
+ *    the window, whose Cancel puts the focus back in it.
+ *  - GIVE BACK: ⌃F again puts the note at the box a plain resize carries it
+ *    to, its chrome back and nothing inert, the focus kept, null heard.
+ *  - ENDS: a close runs from the whole screen into the icon and the note
+ *    reopens at its box; a window opened by code, and the window hidden,
+ *    give the screen back.
+ *  - ONE AT A TIME, REFUSED, ARRANGE, DISPOSE: a second window taking the
+ *    screen gives the first's back first; a palette, a hidden window and one
+ *    not adopted are refused; Arrange Windows, zoom() and write() leave it
+ *    alone; dispose() leaves nothing inert.
+ *  - SAVED: with saving on, the session keeps the box the window will give
+ *    back, and a reload reopens it windowed there.
  *  - WINDOWS: each ctx.window() is a fresh copy of the application's markup.
  *  - CLOSE ALL: closeAll() asks each of an application's windows front to
  *    back and stops at a Cancel; an Option-click on a close box closes
@@ -80,6 +100,13 @@ const closeBox = (page, heading) =>
     const r = win.shadowRoot.querySelector('[part=close-box]').getBoundingClientRect()
     return { x: r.x + r.width / 2, y: r.y + r.height / 2 }
   }, heading)
+/**
+ * A button of the open dialog, by its label, its accessible name. Clicked
+ * through the locator, which waits for it to hold still and take the click:
+ * an open dialog re-centers once its box settles, so a point read at the
+ * open can miss.
+ */
+const dialogButton = (page, label) => page.locator('vf-dialog[open]').getByRole('button', { name: label, exact: true })
 /** Where the keyboard focus is: the window holding it and the innermost element. */
 const focus = (page) =>
   page.evaluate(() => {
@@ -323,13 +350,7 @@ const layout = (page) =>
   const s = shellOn(page)
   const alertText = () => page.evaluate(() => document.querySelector('vf-dialog[open] vf-paragraph')?.textContent ?? null)
   const answer = async (label) => {
-    await page.waitForFunction(() => !!document.querySelector('vf-dialog[open] vf-button'))
-    const at = await page.evaluate((l) => {
-      const button = [...document.querySelectorAll('vf-dialog[open] vf-button')].find((b) => b.textContent === l)
-      const r = button.getBoundingClientRect()
-      return { x: r.x + r.width / 2, y: r.y + r.height / 2 }
-    }, label)
-    await page.mouse.click(at.x, at.y)
+    await dialogButton(page, label).click()
     await page.waitForFunction(() => !document.querySelector('vf-dialog[open]'))
     await s.settle()
   }
@@ -412,18 +433,427 @@ const layout = (page) =>
   await page.close()
 }
 
+// ── FULL SCREEN ─────────────────────────────────────────────────────────────
+
+/** Full screen as the page shows it: the window that has it, its box and chrome, the desktop's tier, and what's inert. */
+const fullState = (page) =>
+  page.evaluate(() => {
+    const desktop = document.querySelector('vf-desktop')
+    const win = window.shell.windows.fullScreenWindow
+    const name = (el) => (el.localName === 'vf-window' ? el.heading : (el.dataset.dialog ?? el.localName))
+    return {
+      win: win?.heading ?? null,
+      box: win ? [win.left, win.top, win.width, win.height] : null,
+      frameless: win?.frameless ?? null,
+      holder: desktop.fullScreenWindow?.heading ?? null,
+      z: win ? Number(win.style.zIndex) : null,
+      barZ: Number(getComputedStyle(desktop.querySelector(':scope > vf-menu-bar')).zIndex),
+      screen: [0, 0, desktop.width, desktop.height],
+      inert: [...desktop.children].filter((el) => el.inert).map(name),
+      live: [...desktop.children].filter((el) => !el.inert).map(name),
+    }
+  })
+/** Hear onFullScreen: each notice's window, and the box and chrome of the window it's about as it arrives. */
+const hearFullScreen = (page) =>
+  page.evaluate(() => {
+    window.__fs = []
+    window.shell.windows.onFullScreen((win) => {
+      if (win) window.__held = win
+      const w = window.__held
+      window.__fs.push({ win: win?.heading ?? null, box: w ? [w.left, w.top, w.width, w.height] : null, frameless: w?.frameless ?? null })
+    })
+  })
+const heard = (page) => page.evaluate(() => window.__fs)
+/** A window's box, by heading, as [left, top, width, height]. */
+const boxOf = async (page, heading) => {
+  const w = await shellOn(page).window(heading)
+  return w && [w.left, w.top, w.width, w.height]
+}
+const same = (a, b) => JSON.stringify(a) === JSON.stringify(b)
+/** The heading of the window the hit test at a point lands in, or the element's tag. */
+const hitAt = (page, p) =>
+  page.evaluate(({ x, y }) => {
+    const el = document.elementFromPoint(x, y)
+    return el?.closest('vf-window')?.heading ?? el?.localName ?? null
+  }, p)
+/** Click a button of the open dialog, by its label, and wait for the dialog to close. */
+const answerDialog = async (page, label) => {
+  await dialogButton(page, label).click()
+  await page.waitForFunction(() => !document.querySelector('vf-dialog[open]'))
+}
+/** The centre of the front note's text area. */
+const textAreaOf = (page, heading) =>
+  page.evaluate((h) => {
+    const win = [...document.querySelectorAll('vf-desktop > vf-window')].find((w) => w.heading === h)
+    const r = win.querySelector('vf-text-area').getBoundingClientRect()
+    return { x: r.x + r.width / 2, y: r.y + r.height / 2 }
+  }, heading)
+const fullItemText = (page) => page.evaluate(() => document.querySelector('vf-menu-item[value="full-screen"]')?.textContent ?? null)
+
+{
+  const page = await openShell(browser)
+  const s = shellOn(page)
+  const documents = await s.icon('Documents')
+  await page.mouse.dblclick(documents.x, documents.y)
+  await s.settle()
+  await s.pick('Apple', 'Note Pad')
+  await s.settle()
+  await page.keyboard.type('Draft')
+  const home = await boxOf(page, 'Untitled')
+  // Where a plain resize carries the note, and back: what giving the screen back after one must match.
+  await resizeTo(page, 900, 640)
+  const carried = await boxOf(page, 'Untitled')
+  await resizeTo(page, 1100, 760)
+  const restored = await boxOf(page, 'Untitled')
+  await hearFullScreen(page)
+
+  await page.keyboard.press('Control+f')
+  await s.settle()
+  let st = await fullState(page)
+  check(
+    'FULL SCREEN  ⌃F gives the front note the whole screen, frameless, on the desktop’s tier above the bar',
+    st.win === 'Untitled' && same(st.box, st.screen) && st.frameless === true && st.holder === 'Untitled' && st.z > st.barZ,
+    JSON.stringify(st)
+  )
+  check(
+    'FULL SCREEN  …the bar, the icons and every other window go inert, the held dialog stays live',
+    ['vf-menu-bar', 'vf-icon-field', 'Documents', 'Info'].every((n) => st.inert.includes(n)) && same([...st.live].sort(), ['Untitled', 'save-changes']),
+    JSON.stringify({ inert: st.inert, live: st.live })
+  )
+  const bar = await page.evaluate(() => {
+    const r = document.querySelector('vf-menu-bar').getBoundingClientRect()
+    return { x: r.x + r.width / 2, y: r.y + r.height / 2 }
+  })
+  const hits = { bar: await hitAt(page, bar), trash: await hitAt(page, await s.icon('Trash')) }
+  check('FULL SCREEN  …it covers the bar and the icons', hits.bar === 'Untitled' && hits.trash === 'Untitled', JSON.stringify(hits))
+  let f = await focus(page)
+  check('FULL SCREEN  …the focus stays where it was, in its text area', f.win === 'Untitled' && f.el === 'textarea', JSON.stringify(f))
+  let notices = await heard(page)
+  check(
+    'FULL SCREEN  …onFullScreen is heard once, the box already the screen’s',
+    notices.length === 1 && notices[0].win === 'Untitled' && same(notices[0].box, st.screen) && notices[0].frameless === true,
+    JSON.stringify(notices)
+  )
+  check('FULL SCREEN  …and the Window menu reads Exit Full Screen', (await fullItemText(page)) === 'Exit Full Screen', await fullItemText(page))
+
+  // Tab never reaches what's covered: each stop is in the window, or nowhere.
+  const stops = []
+  for (let i = 0; i < 4; i++) {
+    await page.keyboard.press('Tab')
+    stops.push(await page.evaluate(() => document.activeElement?.closest('vf-window')?.heading ?? document.activeElement?.localName ?? null))
+  }
+  check('FULL SCREEN  Tab never leaves it for anything else on the page', stops.every((x) => x === 'Untitled' || x === 'body'), stops.join())
+  const area = await textAreaOf(page, 'Untitled')
+  await page.mouse.click(area.x, area.y)
+  // A press on the bezel, which clears the active window otherwise.
+  await page.mouse.click(3, 3)
+  await s.settle()
+  st = await fullState(page)
+  check('FULL SCREEN  a press on the bezel changes nothing', st.win === 'Untitled' && (await s.active()) === 'Untitled', JSON.stringify(st))
+
+  // Covered, the bar still answers key equivalents, and the note's dialog shows over it.
+  await page.keyboard.press('Meta+s')
+  await page.waitForFunction(() => window.shell.catalog.get().items.some((i) => i.name === 'Untitled'))
+  const saved = await s.item('Untitled')
+  check('COVERED  ⌘S saves the note with the bar covered', saved?.data?.text === 'Draft' && (await fullState(page)).win === 'Untitled', JSON.stringify(saved))
+  await page.mouse.click(area.x, area.y)
+  await page.keyboard.type('!')
+  await page.keyboard.press('Control+w')
+  await dialogButton(page, 'Cancel').waitFor()
+  // Read and hit-tested in one go, so a re-centering can't come between.
+  const hit = await page.evaluate(() => {
+    const r = [...document.querySelectorAll('vf-dialog[open] vf-button')].find((b) => b.textContent === 'Cancel').getBoundingClientRect()
+    return !!document.elementFromPoint(r.x + r.width / 2, r.y + r.height / 2)?.closest('vf-dialog')
+  })
+  const asking = { win: (await fullState(page)).win, hit }
+  check('COVERED  ⌃W asks Save Changes over it, the dialog live, the screen still taken', asking.win === 'Untitled' && asking.hit, JSON.stringify(asking))
+  await answerDialog(page, 'Cancel')
+  await s.settle()
+  f = await focus(page)
+  check(
+    'COVERED  …Cancel puts the focus back in the note, the screen still taken',
+    f.win === 'Untitled' && f.el === 'textarea' && (await fullState(page)).win === 'Untitled',
+    JSON.stringify(f)
+  )
+
+  // A resize: the window follows the screen.
+  await resizeTo(page, 900, 640)
+  st = await fullState(page)
+  notices = await heard(page)
+  check(
+    'FULL SCREEN  a screen resize writes the new screen’s box, and onFullScreen says so',
+    same(st.box, st.screen) && st.screen[2] === 880 && notices.at(-1).win === 'Untitled' && same(notices.at(-1).box, st.screen),
+    JSON.stringify({ st, last: notices.at(-1) })
+  )
+
+  // ⌃F again gives the screen back.
+  await page.keyboard.press('Control+f')
+  await s.settle()
+  st = await fullState(page)
+  const back = await boxOf(page, 'Untitled')
+  const chrome = await page.evaluate(() => {
+    const win = [...document.querySelectorAll('vf-desktop > vf-window')].find((w) => w.heading === 'Untitled')
+    return { frameless: win.frameless, bar: getComputedStyle(win.shadowRoot.querySelector('[part=title-bar]')).display, z: Number(win.style.zIndex) }
+  })
+  check(
+    'GIVE BACK  ⌃F again: the note at the box a plain resize carries it to, its chrome back, off the tier',
+    st.win === null && st.holder === null && same(back, carried) && same(restored, home) && !chrome.frameless && chrome.bar !== 'none' && chrome.z < 1_000_000,
+    JSON.stringify({ back, carried, chrome })
+  )
+  check('GIVE BACK  …nothing inert', st.inert.length === 0, JSON.stringify(st.inert))
+  f = await focus(page)
+  check('GIVE BACK  …the focus still in its text area', f.win === 'Untitled' && f.el === 'textarea', JSON.stringify(f))
+  notices = await heard(page)
+  check(
+    'GIVE BACK  …onFullScreen hears null, the box already given back',
+    notices.at(-1).win === null && same(notices.at(-1).box, carried) && notices.at(-1).frameless === false,
+    JSON.stringify(notices.at(-1))
+  )
+  check('GIVE BACK  …and the Window menu reads Full Screen again', (await fullItemText(page)) === 'Full Screen', await fullItemText(page))
+  await page.close()
+}
+
+// A zoomed note keeps its zoom through full screen and a resize, as a resize
+// alone keeps it, and its zoom box still goes back to the box it had.
+{
+  const page = await openShell(browser)
+  const s = shellOn(page)
+  await s.pick('Apple', 'Note Pad')
+  await s.settle()
+  const home = await boxOf(page, 'Untitled')
+  const zoom = () => page.evaluate(() => window.shell.windows.zoom(window.shell.windows.windowsOf('note-pad').find((w) => w.heading === 'Untitled')))
+  /** Note Pad's zoomed box on the live window area: its full height, at the window's left and width. */
+  const zoomedNow = () =>
+    page.evaluate(() => {
+      const a = window.shell.windows.area
+      const win = window.shell.windows.windowsOf('note-pad').find((w) => w.heading === 'Untitled')
+      return [win.left, a.top, win.width, a.height]
+    })
+  await zoom()
+  const zoomed = await boxOf(page, 'Untitled')
+  await page.keyboard.press('Control+f')
+  await s.settle()
+  await resizeTo(page, 900, 640)
+  await page.keyboard.press('Control+f')
+  await s.settle()
+  const back = await boxOf(page, 'Untitled')
+  const want = await zoomedNow()
+  await zoom()
+  const unzoomed = await boxOf(page, 'Untitled')
+  check(
+    'GIVE BACK  a zoomed note given back after a resize is zoomed on the new screen; its zoom box goes back to the box it had',
+    same(back, want) && !same(back, zoomed) && same(unzoomed, home),
+    JSON.stringify({ zoomed, back, want, unzoomed, home })
+  )
+  await page.close()
+}
+
+// ── ENDS ────────────────────────────────────────────────────────────────────
+// A close, a window opened by code, the window hidden.
+{
+  const page = await openShell(browser)
+  const s = shellOn(page)
+  await s.pick('Apple', 'Note Pad')
+  await s.settle()
+  await page.keyboard.type('Kept')
+  await s.pick('File', 'save')
+  await page.waitForFunction(() => window.shell.catalog.get().items.some((i) => i.name === 'Untitled'))
+  const title = await s.titleBar('Untitled')
+  await s.drag(title, { x: title.x + 120, y: title.y + 90 })
+  await s.settle()
+  const home = await boxOf(page, 'Untitled')
+  await page.evaluate(() => {
+    const proto = customElements.get('vf-window').prototype
+    const hide = proto.hide
+    window.__hides = []
+    proto.hide = function (options = {}) {
+      const r = this.getBoundingClientRect()
+      const to = options.to
+      window.__hides.push({ heading: this.heading, from: [r.left, r.top, r.width, r.height], to: to && [to.left, to.top, to.right - to.left, to.bottom - to.top] })
+      return hide.call(this, options)
+    }
+  })
+  await hearFullScreen(page)
+  await page.keyboard.press('Control+f')
+  await s.settle()
+  const screen = await s.screen()
+  await page.keyboard.press('Control+w')
+  await s.settle()
+  const hide = (await page.evaluate(() => window.__hides)).at(-1)
+  const cell = await cellOf(page, 'Untitled')
+  let st = await fullState(page)
+  check(
+    'ENDS  a close from full screen closes from the whole screen into the note’s icon, and gives the screen back',
+    hide?.heading === 'Untitled' &&
+      same(hide.from, [screen.x, screen.y, screen.width, screen.height]) &&
+      same(hide.to, [cell.left, cell.top, cell.right - cell.left, cell.bottom - cell.top]) &&
+      st.win === null && st.holder === null && st.inert.length === 0 && (await heard(page)).at(-1).win === null,
+    JSON.stringify({ hide, st })
+  )
+  const icon = await s.icon('Untitled')
+  await page.mouse.dblclick(icon.x, icon.y)
+  await s.settle()
+  check('ENDS  …and the note reopens at the box it had, not the screen', same(await boxOf(page, 'Untitled'), home), JSON.stringify({ home, now: await boxOf(page, 'Untitled') }))
+
+  // A window opened by code becomes the active one, which gives the screen back.
+  await page.keyboard.press('Control+f')
+  await s.settle()
+  await page.evaluate(() => {
+    const docs = window.shell.catalog.get().items.find((i) => i.name === 'Documents')
+    window.shell.apps.finder.open({ item: docs.id })
+  })
+  await s.settle()
+  st = await fullState(page)
+  check(
+    'ENDS  a window opened by code gives the screen back: the note at its box, the new window active, nothing inert',
+    st.win === null && same(await boxOf(page, 'Untitled'), home) && (await s.active()) === 'Documents' && st.inert.length === 0,
+    JSON.stringify({ st, active: await s.active() })
+  )
+
+  // The window that has the screen hidden: another becomes active, and the
+  // screen comes back. The note is brought forward from under the folder.
+  await page.evaluate(() => {
+    const win = window.shell.windows.windowsOf('note-pad').find((w) => w.heading === 'Untitled')
+    document.querySelector('vf-desktop').bringToFront(win)
+  })
+  await page.keyboard.press('Control+f')
+  await s.settle()
+  const took = (await fullState(page)).win
+  await page.evaluate(() => {
+    window.shell.windows.fullScreenWindow.hidden = true
+  })
+  await s.settle()
+  st = await fullState(page)
+  check(
+    'ENDS  the window that has the screen hidden gives it back',
+    took === 'Untitled' && st.win === null && st.holder === null && st.inert.length === 0,
+    JSON.stringify({ took, st })
+  )
+  await page.close()
+}
+
+// ── ONE AT A TIME, REFUSED, ARRANGE, DISPOSE ────────────────────────────────
+{
+  const page = await openShell(browser)
+  const s = shellOn(page)
+  await s.pick('Apple', 'Note Pad')
+  await s.settle()
+  await s.pick('File', 'new')
+  await s.settle()
+  const documents = await s.icon('Documents')
+  await page.mouse.dblclick(documents.x, documents.y)
+  await s.settle()
+
+  // Refused: a palette, a hidden window and one the manager doesn't hold.
+  const refused = await page.evaluate(() => {
+    const { windows } = window.shell
+    const desktop = document.querySelector('vf-desktop')
+    const info = windows.windowsOf('note-pad').find((w) => windows.isPalette(w))
+    const docs = windows.windowsOf('finder')[0]
+    docs.hidden = true
+    const stray = Object.assign(document.createElement('vf-window'), { heading: 'Stray', width: 100, height: 60 })
+    desktop.append(stray)
+    const answers = [windows.fullScreen(info, true), windows.fullScreen(docs, true), windows.fullScreen(stray, true)]
+    stray.remove()
+    docs.hidden = false
+    return { answers, holder: windows.fullScreenWindow, inert: [...desktop.children].filter((el) => el.inert).length }
+  })
+  check(
+    'REFUSED  a palette, a hidden window and one the manager doesn’t hold: false, nothing changed',
+    same(refused.answers, [false, false, false]) && refused.holder === null && refused.inert === 0,
+    JSON.stringify(refused)
+  )
+
+  const one = await boxOf(page, 'Untitled')
+  await hearFullScreen(page)
+  const answers = await page.evaluate(() => {
+    const { windows } = window.shell
+    const note = (h) => windows.windowsOf('note-pad').find((w) => w.heading === h)
+    return [windows.fullScreen(note('Untitled'), true), windows.fullScreen(note('Untitled 2'), true)]
+  })
+  await s.settle()
+  const st = await fullState(page)
+  const notices = await heard(page)
+  check(
+    'ONE AT A TIME  a second window taking the screen gives the first’s back first',
+    same(answers, [true, true]) && st.win === 'Untitled 2' && same(await boxOf(page, 'Untitled'), one) &&
+      same(notices.map((n) => n.win), ['Untitled', null, 'Untitled 2']),
+    JSON.stringify({ answers, win: st.win, notices })
+  )
+
+  // Arrange Windows, zoom() and write() leave it where it is.
+  const kept = await page.evaluate(() => {
+    const { windows } = window.shell
+    const win = windows.fullScreenWindow
+    windows.arrange()
+    windows.zoom(win)
+    windows.write(win, { left: 100, top: 100 })
+    return { box: [win.left, win.top, win.width, win.height], holder: windows.fullScreenWindow?.heading ?? null }
+  })
+  check('ARRANGE  Arrange Windows, zoom() and write() leave it on the whole screen', same(kept.box, st.screen) && kept.holder === 'Untitled 2', JSON.stringify(kept))
+
+  await page.evaluate(() => window.shell.dispose())
+  const left = await page.evaluate(() => {
+    const desktop = document.querySelector('vf-desktop')
+    return { inert: [...desktop.children].filter((el) => el.inert).map((el) => el.localName), holder: desktop.fullScreenWindow }
+  })
+  check('DISPOSE  dispose() leaves nothing inert and no window on the tier', left.inert.length === 0 && left.holder === null, JSON.stringify(left))
+  await page.close()
+}
+
+// ── SAVED ───────────────────────────────────────────────────────────────────
+// The session keeps the box the window will give back, never the screen.
+{
+  const page = await openShell(browser, { query: '?save=1' })
+  const s = shellOn(page)
+  await s.pick('Apple', 'Note Pad')
+  await s.settle()
+  await page.keyboard.type('Saved')
+  await s.pick('File', 'save')
+  await page.waitForFunction(() => window.shell.catalog.get().items.some((i) => i.name === 'Untitled'))
+  const title = await s.titleBar('Untitled')
+  await s.drag(title, { x: title.x + 60, y: title.y + 120 })
+  await s.settle()
+  const home = await boxOf(page, 'Untitled')
+  const before = await page.evaluate(() => {
+    const win = window.shell.windows.windowsOf('note-pad').find((w) => w.heading === 'Untitled')
+    return { item: window.shell.windows.itemOf(win), pin: window.shell.windows.pinOf(win) }
+  })
+  await page.keyboard.press('Control+f')
+  await s.settle()
+  // A write after the take, with nothing else to write it.
+  await page.evaluate(() => localStorage.removeItem('system-online-sdk-reference'))
+  await page.evaluate(() => window.shell.windows.layoutChanged())
+  const stored = await page
+    .waitForFunction((item) => JSON.parse(localStorage.getItem('system-online-sdk-reference') ?? 'null')?.windows?.[item]?.pin, before.item, { timeout: 5000 })
+    .then((h) => h.jsonValue(), () => null)
+  const pinNow = await page.evaluate(() => window.shell.windows.pinOf(window.shell.windows.fullScreenWindow))
+  check(
+    'SAVED  with the screen taken, the session and pinOf() keep the box it will give back',
+    !!stored && same(stored, before.pin) && same(pinNow, before.pin) && (await fullState(page)).win === 'Untitled',
+    JSON.stringify({ stored, before: before.pin })
+  )
+  await page.reload()
+  await page.evaluate(() => window.shell.ready)
+  await s.settle()
+  const st = await fullState(page)
+  const after = await page.evaluate(() => {
+    const win = [...document.querySelectorAll('vf-desktop > vf-window')].find((w) => w.heading === 'Untitled')
+    return win && { box: [win.left, win.top, win.width, win.height], frameless: win.frameless }
+  })
+  check(
+    'SAVED  …and a reload reopens the note windowed, at that box',
+    st.win === null && st.inert.length === 0 && !!after && same(after.box, home) && after.frameless === false,
+    JSON.stringify({ st, after, home })
+  )
+  await page.close()
+}
+
 // ── CLOSE ALL ───────────────────────────────────────────────────────────────
 {
   const page = await openShell(browser)
   const s = shellOn(page)
-  const answer = async (label) => {
-    await page.waitForFunction(() => !!document.querySelector('vf-dialog[open] vf-button'))
-    const at = await page.evaluate((l) => {
-      const r = [...document.querySelectorAll('vf-dialog[open] vf-button')].find((b) => b.textContent === l).getBoundingClientRect()
-      return { x: r.x + r.width / 2, y: r.y + r.height / 2 }
-    }, label)
-    await page.mouse.click(at.x, at.y)
-  }
+  const answer = (label) => dialogButton(page, label).click()
   const docs = () => page.evaluate(() => window.shell.windows.windowsOf('note-pad').filter((w) => !window.shell.windows.isPalette(w)).length)
   await s.pick('Apple', 'Note Pad')
   await s.settle()

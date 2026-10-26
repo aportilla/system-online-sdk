@@ -12,6 +12,9 @@
  *   opens its item as a double-click would. No application adds to it.
  * - While an application's held dialog is open, the bar shows that
  *   application's name and menus instead; nothing else changes.
+ * - A press on the bezel brings the default application forward, but for a
+ *   window that has the screen (the window manager's `fullScreen`), which
+ *   keeps it: the bar is covered then, and still answers key equivalents.
  * - Each application's `init(ctx)` gets the desktop, the window manager, its
  *   own menus, dialogs and window markup, the other applications' actions
  *   (read at the call), the catalog when a Finder runs, the system's fonts,
@@ -442,9 +445,10 @@ export function createShell(desktop: VfDesktop, options: ShellOptions): Shell {
   const wm = createWindowManager(desktop, { defaultApp, savedPin: (item) => state?.pin(item) ?? null })
   windows = wm
 
-  // A press on the desktop itself — its bezel — brings the default application forward.
+  // A press on the desktop itself — its bezel — brings the default
+  // application forward, but for a window that has the screen, which keeps it.
   const onDesktopPress = (e: Event) => {
-    if (e.target === desktop) desktop.clearActive()
+    if (e.target === desktop && !wm.fullScreenWindow) desktop.clearActive()
   }
   desktop.addEventListener('pointerdown', onDesktopPress)
   teardown.push(() => desktop.removeEventListener('pointerdown', onDesktopPress))

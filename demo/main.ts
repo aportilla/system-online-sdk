@@ -6,8 +6,9 @@
  * with documents of its own kind, an Info palette shown while it is front, a
  * close that asks about unsaved changes in an alert of its own, a hook that
  * makes leaving the page ask first while a note is unsaved, a zoom box the
- * window manager runs, and a Font menu of the installed families. No
- * application here opens a suitcase, so opening one says so.
+ * window manager runs, a Full Screen command that gives the front note the
+ * whole screen, and a Font menu of the installed families. No application
+ * here opens a suitcase, so opening one says so.
  *
  * `?save=1` keeps the catalog in IndexedDB and the session in localStorage;
  * `?cleanup=1` turns on the Finder's Clean Up after a resize; `?open=` opens
@@ -45,6 +46,7 @@ const NOTE_PAD_MENUS = `
   <vf-menu data-menu="font" label="Font"></vf-menu>
   <vf-menu data-menu="window" label="Window">
     <vf-menu-item value="info">Hide Info</vf-menu-item>
+    <vf-menu-item value="full-screen" shortcut="⌃F">Full Screen</vf-menu-item>
   </vf-menu>`
 
 /** Note Pad's own alert: its buttons answer through the form. */
@@ -274,7 +276,7 @@ function notePad(): AppDefinition<NotePadActions> {
         else if (value === 'info') {
           infoShown = !infoShown
           windows.palettesChanged()
-        }
+        } else if (value === 'full-screen' && win) windows.fullScreen(win, windows.fullScreenWindow !== win)
       })
       ctx.gate(ctx.item('save'), () => {
         const win = front()
@@ -286,6 +288,15 @@ function notePad(): AppDefinition<NotePadActions> {
         const text = infoShown ? 'Hide Info' : 'Show Info'
         if (infoItem.textContent !== text) infoItem.textContent = text
         return true
+      })
+      // Full Screen gives the front note the whole screen, and reads Exit Full
+      // Screen while it has it. The bar is covered then, and ⌃F still reaches it.
+      const fullItem = ctx.item('full-screen')
+      ctx.gate(fullItem, () => {
+        const win = front()
+        const text = win && windows.fullScreenWindow === win ? 'Exit Full Screen' : 'Full Screen'
+        if (fullItem.textContent !== text) fullItem.textContent = text
+        return !!win
       })
 
       return {

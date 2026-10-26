@@ -36,6 +36,14 @@
  * - Dialogs: `holdDialog()` holds an application's dialog under it, in the
  *   desktop. The manager follows each held dialog's `open` attribute, and
  *   `asking` is the application of the one opened last and still open.
+ * - Full screen: `fullScreen(win, true)` gives a window the whole screen,
+ *   the bar's band included, frameless on the desktop's tier above the menu
+ *   bar, and puts the rest of the desktop out of reach, inert, its dialogs
+ *   aside. One window at a time. Giving it back, its close, another window
+ *   becoming active or none, and dispose() end it, the window back at the
+ *   box it had as a resize would have carried it; the session and this
+ *   session's boxes keep that box, never the screen. `onFullScreen` reports
+ *   each change, and each resize while it lasts.
  */
 
 import { snapSys, systemPxQuantum, VfWindow } from 'vintage-frames'
@@ -133,6 +141,20 @@ interface Adoption {
   zoom: ((area: Box, box: Box) => BoxInput) | null
   palette: null | (() => boolean)
   close: CloseHandler | null
+}
+
+/**
+ * What a window that takes the screen keeps to give back: its box and the
+ * box's pin, which a resize carries; whether it sat at its `keep` box or its
+ * zoomed box, which a resize holds it at; and whether it was frameless.
+ */
+interface Taken {
+  win: VfWindow
+  box: Box
+  pin: Pin
+  kept: boolean
+  zoomed: boolean
+  frameless: boolean
 }
 
 /**
@@ -259,6 +281,12 @@ export function createWindowManager(desktop: VfDesktop, options: WindowManagerOp
   let pins = new WeakMap<VfWindow, { pin: Pin } & Box>()
   /** Each zoomed window's box from before its zoom, with the pin that carries it through a raster resize. */
   const unzoomed = new WeakMap<VfWindow, { pin: Pin; box: Box }>()
+  /** The window that has the screen, and what it gives back, or null. */
+  let full: Taken | null = null
+  /** The desktop's children the takeover made inert, live again when it ends. */
+  const covered = new Set<HTMLElement>()
+  /** Covers a child appended to the desktop while the screen is taken. */
+  let coverWatch: MutationObserver | null = null
   let bands: Partial<Bands> = {}
   /** The frame every window's pin is read in: below the window area's top. */
   const frame = (): Frame => frameOf(area().top, bands)
@@ -278,6 +306,11 @@ export function createWindowManager(desktop: VfDesktop, options: WindowManagerOp
   const beforeFrontListeners = new Set<(win: HTMLElement | null) => void>()
   const frontListeners = new Set<(app: string) => void>()
   const dialogListeners = new Set<() => void>()
+  const fullScreenListeners = new Set<(win: VfWindow | null) => void>()
+  const notifyFullScreen = () => {
+    const win = full?.win ?? null
+    for (const fn of [...fullScreenListeners]) fn(win)
+  }
 
   // Dialogs.
 
@@ -353,11 +386,10 @@ export function createWindowManager(desktop: VfDesktop, options: WindowManagerOp
     return place ? clampedBox(win, place(area())) : null
   }
 
-  /** A window's zoomed box on `on` (the live area by default), unclamped, or null without a `zoom`. */
-  const zoomBoxOf = (win: VfWindow, on: Box = area()): Box | null => {
+  /** A window's zoomed box on `on` (the live area by default) from its box `cur`, unclamped, or null without a `zoom`. */
+  const zoomBoxOf = (win: VfWindow, on: Box = area(), cur: Box = boxOf(win)): Box | null => {
     const zoom = adopted.get(win)?.zoom
     if (!zoom) return null
-    const cur = boxOf(win)
     const g = zoom(on, cur)
     return { left: g.left ?? cur.left, top: g.top ?? cur.top, width: g.width ?? cur.width, height: g.height ?? cur.height }
   }
@@ -384,11 +416,11 @@ export function createWindowManager(desktop: VfDesktop, options: WindowManagerOp
     })
   }
 
-  /** The first cascade slot from the area's origin that no shown window holds. */
+  /** The first cascade slot from the area's origin that no shown window holds, the one that has the screen at the box it will give back. */
   const freeSlot = (except?: VfWindow): number => {
     const occupied = [...adopted]
       .filter(([w, a]) => w !== except && !w.hidden && !a.palette)
-      .map(([w]) => boxOf(w))
+      .map(([w]) => (full?.win === w ? givenBack(full) : boxOf(w)))
     return cascadeFrom(windowOrigin(area()), occupied).slot
   }
 
@@ -435,7 +467,124 @@ export function createWindowManager(desktop: VfDesktop, options: WindowManagerOp
   const focusActive = (win: HTMLElement, select = false) =>
     void focusInto(win, { when: () => desktop.activeWindow === win, select })
 
+  // Full screen.
+
+  /** The whole screen, the bar's band included: the box of the window that has it. */
+  const screenBox = (): Placed => ({ left: 0, top: 0, ...raster() })
+
+  /**
+   * The box a window that took the screen goes back to: where a resize
+   * would have carried it — its `keep` box or its zoomed box on the area as
+   * it is, where it sat at one, else its pin — clamped as every placement is.
+   */
+  function givenBack(t: Taken): Placed {
+    const keep = adopted.get(t.win)?.keep
+    if (t.kept && keep) return clampedBox(t.win, keep(area()))
+    const zoomed = t.zoomed ? zoomBoxOf(t.win, area(), t.box) : null
+    return zoomed ? clampedBox(t.win, zoomed) : pinnedBox(t.win, t.pin, policyOf(t.win, t.box))
+  }
+
+  /** The pin of the box a window that took the screen will give back: its own, unless a resize holds it elsewhere. */
+  const givenBackPin = (t: Taken): Pin => {
+    if (!t.kept && !t.zoomed) return t.pin
+    const g = givenBack(t)
+    return pinOf({ left: g.left, top: g.top, width: g.width ?? t.box.width, height: g.height ?? t.box.height }, raster(), frame())
+  }
+
+  /**
+   * Whether a child of the desktop stays live while the screen is taken: a
+   * dialog, which shows over it in the top layer — one held, any `vf-dialog`
+   * (a page's About box), or a child holding either, since a dialog in an
+   * inert subtree is inert in the top layer too.
+   */
+  const spared = (el: Element): boolean =>
+    el.localName === 'vf-dialog' ||
+    held.has(el) ||
+    !!el.querySelector('vf-dialog') ||
+    [...held.keys()].some((dialog) => el.contains(dialog))
+
+  /** Put a child of the desktop out of reach while the screen is taken. One inert already stays the page's. */
+  const cover = (el: Element) => {
+    if (!(el instanceof HTMLElement) || el === full?.win || el.inert || spared(el)) return
+    el.inert = true
+    covered.add(el)
+  }
+
+  /** The rest of the desktop out of reach: the bar, the icons, every other window, and what arrives while it lasts. */
+  function coverRest(): void {
+    for (const el of desktop.children) cover(el)
+    coverWatch = new MutationObserver((records) => {
+      if (!full) return
+      for (const r of records) for (const node of r.addedNodes) if (node instanceof Element && node.parentElement === desktop) cover(node)
+    })
+    coverWatch.observe(desktop, { childList: true })
+  }
+
+  /** The rest of the desktop live again. */
+  function uncover(): void {
+    coverWatch?.disconnect()
+    coverWatch = null
+    for (const el of covered) el.inert = false
+    covered.clear()
+  }
+
+  /**
+   * Give `win` the screen: brought forward, frameless, on the desktop's tier
+   * at the whole screen's box, and the rest of the desktop inert. Refused
+   * for a window the manager doesn't hold, a palette, and one hidden or not
+   * in the desktop. Whether `win` has the screen.
+   */
+  function takeScreen(win: VfWindow): boolean {
+    const a = adopted.get(win)
+    if (!a || a.palette || win.hidden || win.parentElement !== desktop) return false
+    if (full?.win === win) return true
+    // One at a time.
+    giveScreen()
+    if (desktop.activeWindow !== win) desktop.bringToFront(win)
+    if (desktop.activeWindow !== win) return false
+    const box = boxOf(win)
+    const zoomed = zoomBoxOf(win)
+    full = {
+      win,
+      box,
+      pin: pinOf(box, raster(), frame()),
+      kept: !!a.keep && nearBox(box, a.keep(area())),
+      zoomed: !!zoomed && nearBox(box, zoomed),
+      frameless: win.frameless,
+    }
+    win.frameless = true
+    desktop.fullScreenWindow = win
+    writeBox(win, screenBox())
+    coverRest()
+    // The focus stays where it was, inside it. Outside it, or on a widget of
+    // its title bar, which goes with the chrome, it moves into the body.
+    if (!focusIsIn(win) || win.shadowRoot?.activeElement) focusActive(win)
+    notifyLayout()
+    notifyFullScreen()
+    return true
+  }
+
+  /**
+   * The window that has the screen gives it back: the rest of the desktop
+   * live again, the window off the tier with its chrome as it was, and,
+   * unless it's closing, at the box it had, as a resize would have carried
+   * it. The focus stays where it was.
+   */
+  function giveScreen({ write = true }: { write?: boolean } = {}): void {
+    const t = full
+    if (!t) return
+    full = null
+    uncover()
+    if (desktop.fullScreenWindow === t.win) desktop.fullScreenWindow = null
+    t.win.frameless = t.frameless
+    if (write) writeBox(t.win, givenBack(t))
+    notifyLayout()
+    notifyFullScreen()
+  }
+
   const applyActive = (win: HTMLElement | null) => {
+    // Another window active, or none, under the takeover would get keys nobody can see.
+    if (full && win !== full.win) giveScreen()
     followFocus(win)
     for (const fn of [...beforeFrontListeners]) fn(win)
     const next = appOf(win)
@@ -493,6 +642,11 @@ export function createWindowManager(desktop: VfDesktop, options: WindowManagerOp
 
   /** Re-pin one window from the `before` raster to `after`. */
   const repin = (win: VfWindow, before: Size, after: Size, beforeArea: Box) => {
+    // The window that has the screen follows it.
+    if (full?.win === win) {
+      writeBox(win, screenBox())
+      return
+    }
     const cur = boxOf(win)
     const a = adopted.get(win)
     if (a?.keep && nearBox(cur, a.keep(beforeArea))) {
@@ -625,7 +779,9 @@ export function createWindowManager(desktop: VfDesktop, options: WindowManagerOp
     /**
      * Close a window into `to` — by default its home box, the Finder's icon
      * for it — then release and remove it. The item's box is remembered for
-     * the session. Resolves when the zoom rects have landed.
+     * the session: for a window that has the screen, the box it would give
+     * back, its rects running from the whole screen. Resolves when the zoom
+     * rects have landed.
      */
     close(win: VfWindow, { to }: { to?: VfViewportBox | null } = {}): Promise<boolean> {
       const a = adopted.get(win)
@@ -633,8 +789,12 @@ export function createWindowManager(desktop: VfDesktop, options: WindowManagerOp
       const app = a?.app ?? null
       const into = to !== undefined ? to : app != null ? homeBox(item, app) : null
       const wasActive = desktop.activeWindow === win || focusIsIn(win)
-      if (item != null && app != null) remembered.set(item, { app, pin: pinOf(boxOf(win), raster(), frame()) })
+      const taken = full?.win === win ? full : null
+      const pin = taken ? givenBackPin(taken) : pinOf(boxOf(win), raster(), frame())
+      if (item != null && app != null) remembered.set(item, { app, pin })
       const landed = win.hide({ to: into })
+      // The rects run from the whole screen; the rest of the desktop is live again.
+      if (taken) giveScreen({ write: false })
       if (item != null) countUp(closing, item)
       if (app != null && !a?.palette) countUp(closingApps, app)
       const done = () => {
@@ -775,8 +935,9 @@ export function createWindowManager(desktop: VfDesktop, options: WindowManagerOp
       syncPalettes()
     },
 
-    /** Write a box for a gesture the owner runs itself — its group's arrange, a zoom of its own. */
+    /** Write a box for a gesture the owner runs itself — its group's arrange, a zoom of its own. The window that has the screen keeps the screen's. */
     write(win: VfWindow, box: Placed): void {
+      if (full?.win === win) return
       writeBox(win, box)
       notifyLayout()
     },
@@ -786,9 +947,10 @@ export function createWindowManager(desktop: VfDesktop, options: WindowManagerOp
      * box, the window goes there, its box remembered; at it, the window goes
      * back to that box, carried by its pin through any raster resize since,
      * or to its `place` with none remembered. The zoom box's press runs it;
-     * so can a menu command.
+     * so can a menu command. The window that has the screen keeps it.
      */
     zoom(win: VfWindow): void {
+      if (full?.win === win) return
       const target = zoomBoxOf(win)
       if (!target) return
       const cur = boxOf(win)
@@ -815,9 +977,9 @@ export function createWindowManager(desktop: VfDesktop, options: WindowManagerOp
       return placedBox(win)
     },
 
-    /** A window's pin on the current raster, for an owner that saves it. */
+    /** A window's pin on the current raster, for an owner that saves it; the window that has the screen's is the box it will give back. */
     pinOf(win: VfWindow): Pin {
-      return pinOf(boxOf(win), raster(), frame())
+      return full?.win === win ? givenBackPin(full) : pinOf(boxOf(win), raster(), frame())
     },
 
     /** A pin on the live raster, clamped, under the window's policy or `policy`. */
@@ -841,12 +1003,13 @@ export function createWindowManager(desktop: VfDesktop, options: WindowManagerOp
       }
     },
 
-    /** View → Arrange Windows: every group's arrange, then every `place`. Nothing is raised. */
+    /** View → Arrange Windows: every group's arrange, then every `place`, but for the window that has the screen. Nothing is raised. */
     arrange(): void {
       holding = true
       try {
         for (const group of groups.values()) group.arrange()
         for (const win of adopted.keys()) {
+          if (win === full?.win) continue
           const g = placedBox(win)
           if (g) writeBox(win, g)
         }
@@ -856,10 +1019,11 @@ export function createWindowManager(desktop: VfDesktop, options: WindowManagerOp
       notifyLayout()
     },
 
-    /** Whether every group is arranged and every shown window sits at its `place`. */
+    /** Whether every group is arranged and every shown window sits at its `place`, the one that has the screen counted as arranged. */
     arranged(): boolean {
       for (const group of groups.values()) if (!group.arranged()) return false
       for (const win of adopted.keys()) {
+        if (win === full?.win) continue
         const g = placedBox(win)
         if (g && !win.hidden && !at(win, g)) return false
       }
@@ -869,7 +1033,8 @@ export function createWindowManager(desktop: VfDesktop, options: WindowManagerOp
     /**
      * Carry every window from the `before` raster to the live one with the
      * nine-slice pin, then tell the onRaster listeners. Nothing clamps a
-     * window's position, so growing back restores it.
+     * window's position, so growing back restores it. The window that has
+     * the screen covers the new one, and `onFullScreen` says so after them.
      */
     resized(before: Size): void {
       const after = raster()
@@ -884,17 +1049,22 @@ export function createWindowManager(desktop: VfDesktop, options: WindowManagerOp
       }
       for (const win of adopted.keys()) repin(win, before, after, beforeArea)
       for (const fn of [...rasterListeners]) fn(before, after)
+      if (full) notifyFullScreen()
       notifyLayout()
     },
 
-    /** The windows' saved boxes: each open one with its depth, the palettes as boxes alone. */
+    /**
+     * The windows' saved boxes: each open one with its depth, the palettes
+     * as boxes alone, and the window that has the screen at the box it will
+     * give back, never the screen's.
+     */
     snapshot(): Record<string, { app: string; pin: Pin; z?: number }> {
       const out: Record<string, { app: string; pin: Pin; z?: number }> = {}
       for (const [item, saved] of remembered) out[item] = { ...saved }
       const order = desktop.stackingOrder
       for (const [win, a] of adopted) {
         if (a.item == null) continue
-        const pin = pinOf(boxOf(win), raster(), frame())
+        const pin = full?.win === win ? givenBackPin(full) : pinOf(boxOf(win), raster(), frame())
         out[a.item] = a.palette ? { app: a.app, pin } : { app: a.app, pin, z: order.indexOf(win) }
       }
       return out
@@ -951,8 +1121,40 @@ export function createWindowManager(desktop: VfDesktop, options: WindowManagerOp
       return () => void dialogListeners.delete(fn)
     },
 
+    /** The window that has the screen, or null. */
+    get fullScreenWindow(): VfWindow | null {
+      return full?.win ?? null
+    },
+
+    /**
+     * Give `win` the whole screen, or give it back (`on` false). Taking it,
+     * for an adopted window that's shown and not a palette: the window is
+     * brought forward, draws no chrome and covers the screen, the bar's band
+     * included, on the desktop's tier above the menu bar; the bar, the icons
+     * and every other window go inert, the dialogs aside; the focus stays
+     * where it was, inside it. One window has the screen at a time: one that
+     * has it gives it back first. Giving it back makes the rest live again
+     * and puts the window at the box it had, as a resize would have carried
+     * it, its chrome back. Its close, another window becoming active or
+     * none, and dispose() give it back too. Returns whether `win` has the
+     * screen.
+     */
+    fullScreen(win: VfWindow, on: boolean): boolean {
+      if (on) return takeScreen(win)
+      if (full?.win === win) giveScreen()
+      return false
+    },
+
+    /** The screen taken, given back, or resized while it's taken: `fn(win)`, the window that has it or null, once its box is written. Returns the unsubscribe. */
+    onFullScreen(fn: (win: VfWindow | null) => void): () => void {
+      fullScreenListeners.add(fn)
+      return () => void fullScreenListeners.delete(fn)
+    },
+
     dispose(): void {
       clearTimeout(layoutSoon)
+      // The page as the shell found it: nothing inert, the bar uncovered.
+      giveScreen({ write: false })
       for (const fn of teardown) fn()
       layoutListeners.clear()
       windowListeners.clear()
@@ -960,6 +1162,7 @@ export function createWindowManager(desktop: VfDesktop, options: WindowManagerOp
       beforeFrontListeners.clear()
       frontListeners.clear()
       dialogListeners.clear()
+      fullScreenListeners.clear()
       for (const { observer } of held.values()) observer.disconnect()
       held.clear()
       openDialogs = []

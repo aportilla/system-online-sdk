@@ -250,7 +250,7 @@ windows.open({
 ```
 
 - `open()` brings the item's window forward if one is open. Otherwise it makes the window, appends it to the desktop, places it, and opens it out of `from`.
-- Placement, in order: this session's place for the item, the saved one, then `place`. The default `place` is the first cascade step no open window holds, 40 right and 20 down from the top left of the area below the menu bar. Every placement is held inside that area.
+- Placement, in order: this session's place for the item, the saved one, then `place`. The default `place` is the first cascade step no open window holds, 40 right and 20 down from the top left of the area below the menu bar. Every placement is held inside that area; only a window that has the screen leaves it (§ Full screen).
 - `close(win)` closes the window into its home box and removes it. The home box is the item's icon, else the nearest open folder around it. A window of an application's own closes into the application's icon. The window's box is kept for the session.
 - With `close` set, the close box and File → Close call it instead, and the application calls `windows.close(win)` once it decides. It gets the window and the modifier keys held on the close box's click (`{ altKey, shiftKey, metaKey, ctrlKey }`); `requestClose(win, keys)` passes them on, and a close from a menu passes none. A handler that decides later, after a Save prompt, returns its promise; `requestClose()` resolves whether the window closed once it settles.
 - `closeAll(app)` asks each of an application's windows to close, front to back, palettes aside: a Quit is one line. It resolves `false` at the first window still open after its handler, a Cancel, and `true` once all have closed. An Option-click on a window's close box does the same for its application, and each handler still decides for its own window.
@@ -267,10 +267,40 @@ windows.open({
 | --- | --- |
 | `front` | The front application's id. |
 | `asking` | The application whose held dialog opened last and is still open, or `null`. The bar shows it while it is set. |
+| `fullScreenWindow` | The window that has the screen, or `null` (§ Full screen). |
 | `windowFor(item)`, `itemOf(win)`, `appOf(el)`, `windowsOf(app)`, `dialogsOf(app)` | Lookups. `appOf()` takes a window or a held dialog. `windowsOf()` lists back to front. |
 | `isOpen(item)`, `hasWindows(app)` | Whether a window is open, or still closing into its icon. |
 | `holdDialog(dialog, { app })`, `releaseDialog(dialog)` | What `ctx.hold()` and `ctx.release()` call. |
-| `onWindows(fn)`, `onLayout(fn)`, `onRaster(fn)`, `onFront(fn)`, `beforeFront(fn)`, `onDialogs(fn)` | A window opened or closed; any move, resize or arrangement; a screen resize; the front application changed, and just before it does; a held dialog opened or closed. Each returns its unsubscribe. |
+| `onWindows(fn)`, `onLayout(fn)`, `onRaster(fn)`, `onFront(fn)`, `beforeFront(fn)`, `onDialogs(fn)`, `onFullScreen(fn)` | A window opened or closed; any move, resize or arrangement; a screen resize; the front application changed, and just before it does; a held dialog opened or closed; the screen taken, given back, or resized while it's taken. Each returns its unsubscribe. |
+
+### Full screen
+
+A window can take the whole screen, a game's say: the menu bar, the icons and every other window give way, and the window covers the screen, the bar's band included.
+
+```ts
+init(ctx) {
+  /** The game's window, while it's open. */
+  let game: VfWindow | null = null
+  // Its own item takes the screen and gives it back.
+  ctx.onMenu((value) => {
+    if (value === 'full-screen' && game) ctx.windows.fullScreen(game, ctx.windows.fullScreenWindow !== game)
+  })
+  // The window lays itself out from its own box: the screen's while it has it.
+  ctx.onDispose(ctx.windows.onFullScreen((win) => game && fit(game, win === game)))
+}
+```
+
+- `fullScreen(win, true)` takes the screen for an adopted window that's shown and not a palette, and returns whether `win` has it; anything else is refused, `false`. The window comes to the front if it isn't there, draws no chrome (vintage-frames' `frameless`), and goes to the whole screen's box, `0, 0` at the screen's `width` × `height`, on the desktop's tier above the menu bar (`vf-desktop`'s `fullScreenWindow`), under the screen's rounded corners. The focus stays where it was, inside it. One window has the screen at a time: one that has it gives it back first.
+- **The rest of the desktop is out of reach.** The bar, the icons, every other window and whatever else the page keeps in the desktop go `inert`, so neither a press nor Tab reaches what can't be seen, and a press on the bezel changes nothing. Dialogs stay live: an application's, and any `vf-dialog`, a page's About box say, which show over the window in the top layer as over any other, the focus going back into it when one closes. Palettes are covered, the full-screen application's own included.
+- **The bar is covered, not hidden.** Its band stays in the work area, so nothing else's geometry moves, and it still answers key equivalents: ⌃W closes the window, ⌃Q quits.
+- **It follows the screen**: a resize writes the new screen's box.
+- `fullScreen(win, false)` gives it back: the rest of the desktop is live again, and the window gets its chrome back and goes to the box it had, as a resize since would have carried it (held at its `keep` box, zoomed, or at its place by the screen's edges), clamped as every placement is. The focus stays where it was.
+- **What else gives it back**: the window closing, by any route, from the whole screen into its icon; another window becoming active, or none, which only code can do with the rest inert, an application opening a window or a restart raising another's; and `dispose()`, which leaves nothing inert and the bar uncovered.
+- `onFullScreen(fn)` calls `fn(win)` once the window's box is written, when it takes the screen and after each resize while it has it (after `onRaster`), and `fn(null)` whenever the screen is given back. An application subscribes in `init` and unsubscribes through `ctx.onDispose`.
+- **Never saved.** The session, `pinOf(win)` and the box a closed window reopens at keep the box it will give back, never the screen's, and full screen itself isn't kept: a reload or a restart reopens the window as it was before. Taking the screen again at an open is the application's, from a preference of its own.
+- Arrange Windows leaves it where it is and counts it as arranged, and `zoom()` and `write()` leave it alone.
+- The shell adds no command for it: Full Screen is an application's own item, and while the bar is covered, its key equivalent or something in the window gives the screen back.
+- An application on a page older than `fullScreen` finds none, and checks for it first: `typeof ctx.windows.fullScreen === 'function'`.
 
 ## The catalog
 
@@ -807,4 +837,4 @@ import { createCatalog, memoryStorage, childrenOf, isPin, cascadedBox } from 'sy
 
 ## The reference page
 
-This repo's `index.html` runs the shell with the Finder and Note Pad, a small application with documents of its own kind, an Info palette, a close that asks about unsaved changes in an alert of its own, a `beforeQuit` that makes leaving the page ask first while a note is unsaved, a `claim` that makes a note of a dropped text file, and a Font menu of the installed families (`demo/main.ts`). Its System Folder sits on the desktop. Its Apple Menu Items holds Note Pad, and its Fonts a suitcase of each of the two families the page serves its system, vintage-frames' own faces (`demo/fonts.ts`). No application there opens a suitcase, so opening one raises the Finder's alert. It sets no trust, so an app file dropped on it installs. `?save=1` keeps the catalog, the installs and the session across reloads, `?cleanup=1` turns on Clean Up after a resize, and `?open=Projects&open=Archive` opens those items at load. `verify:front`, `verify:windows`, `verify:finder`, `verify:fonts` and `verify:installs` drive it, the last two fixtures of their own too, and `verify:unit` tests the pure modules and the build entry under Node ([DEVELOPING.md](./DEVELOPING.md)).
+This repo's `index.html` runs the shell with the Finder and Note Pad, a small application with documents of its own kind, an Info palette, a close that asks about unsaved changes in an alert of its own, a `beforeQuit` that makes leaving the page ask first while a note is unsaved, a `claim` that makes a note of a dropped text file, Window → Full Screen (⌃F), which gives the front note the whole screen and reads Exit Full Screen while it has it, and a Font menu of the installed families (`demo/main.ts`). Its System Folder sits on the desktop. Its Apple Menu Items holds Note Pad, and its Fonts a suitcase of each of the two families the page serves its system, vintage-frames' own faces (`demo/fonts.ts`). No application there opens a suitcase, so opening one raises the Finder's alert. It sets no trust, so an app file dropped on it installs. `?save=1` keeps the catalog, the installs and the session across reloads, `?cleanup=1` turns on Clean Up after a resize, and `?open=Projects&open=Archive` opens those items at load. `verify:front`, `verify:windows`, `verify:finder`, `verify:fonts` and `verify:installs` drive it, the last two fixtures of their own too, and `verify:unit` tests the pure modules and the build entry under Node ([DEVELOPING.md](./DEVELOPING.md)).

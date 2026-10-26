@@ -35,6 +35,8 @@
  *  - ITSELF, ART: an application restarts itself through its own ctx; its
  *    document's icon never shows the Finder's document art on the way, and
  *    takes the new code's art.
+ *  - FULL SCREEN: a restart from full screen reopens the window at the box
+ *    it would have given back, windowed, the rest of the desktop live.
  *  - REFUSED: restart() refuses one built in, one not installed, and one the
  *    boot skipped.
  *  - BEFORE QUIT: an application's offer to save is asked only while it holds
@@ -799,6 +801,34 @@ const same = (a, b) => JSON.stringify(a) === JSON.stringify(b)
     redrawn.status === 'restarted' && art.frames.join() === '/demo/icons/app-icon.png,/demo/icons/trash.png' &&
       art.held.join() === '/demo/icons/app-icon.png,/demo/icons/trash.png',
     JSON.stringify({ redrawn, art })
+  )
+
+  // FULL SCREEN: a restart from full screen reopens the window at the box it
+  // would have given back, windowed.
+  const taken = await page.evaluate(() => {
+    const { windows } = window.shell
+    const win = windows.windowFor('probe')
+    const before = [win.left, win.top, win.width, win.height]
+    const took = windows.fullScreen(win, true)
+    return { before, took, box: [win.left, win.top, win.width, win.height] }
+  })
+  const fromFull = await restart(page, 'probe')
+  await s.settle()
+  const reopened = await page.evaluate(() => {
+    const { windows } = window.shell
+    const win = windows.windowFor('probe')
+    return {
+      box: win && [win.left, win.top, win.width, win.height],
+      frameless: win?.frameless ?? null,
+      holder: windows.fullScreenWindow?.heading ?? null,
+      inert: [...document.querySelector('vf-desktop').children].filter((el) => el.inert).length,
+    }
+  })
+  check(
+    'FULL SCREEN  a restart from full screen reopens the window at the box it would give back, windowed, nothing inert',
+    taken.took && !same(taken.box, taken.before) && fromFull.status === 'restarted' && same(reopened.box, taken.before) &&
+      reopened.frameless === false && reopened.holder === null && reopened.inert === 0,
+    JSON.stringify({ taken, fromFull, reopened })
   )
 
   const refusals = await page.evaluate(async () => [await window.shell.restart('note-pad'), await window.shell.restart('ghost')])
